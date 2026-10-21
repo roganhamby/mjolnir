@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:uuid/uuid.dart';
 import '../models/server_config.dart';
+import '../theme/ansi_themes.dart';
 
 class ServerEditDialog extends StatefulWidget {
   final ServerConfig? initialServer;
@@ -32,6 +33,7 @@ class _ServerEditDialogState extends State<ServerEditDialog> {
   ConnectionType _connectionType = ConnectionType.ssh;
   AuthType _authType = AuthType.password;
   bool _obscurePassword = true;
+  late String _terminalTheme;
 
   @override
   void initState() {
@@ -46,6 +48,7 @@ class _ServerEditDialogState extends State<ServerEditDialog> {
 
     _connectionType = s?.connectionType ?? ConnectionType.ssh;
     _authType = s?.authType ?? AuthType.password;
+    _terminalTheme = s?.terminalTheme ?? 'Default Dark';
     _passwordController = TextEditingController(text: s?.decryptedCredentials?.password ?? '');
     _privateKeyController = TextEditingController(text: s?.decryptedCredentials?.privateKey ?? '');
     _passphraseController = TextEditingController(text: s?.decryptedCredentials?.passphrase ?? '');
@@ -89,7 +92,7 @@ class _ServerEditDialogState extends State<ServerEditDialog> {
       connectionType: _connectionType,
       authType: _authType,
       terminalFontSize: widget.initialServer?.terminalFontSize ?? 13.0,
-      terminalTheme: widget.initialServer?.terminalTheme ?? 'Default Dark',
+      terminalTheme: _terminalTheme,
       decryptedCredentials: credentials,
     );
 
@@ -180,6 +183,29 @@ class _ServerEditDialogState extends State<ServerEditDialog> {
                     const Text('SFTP File Browser'),
                   ],
                 ),
+                if (_connectionType == ConnectionType.ssh) ...[
+                  const SizedBox(height: 12),
+                  const Text('ANSI Terminal Theme', style: TextStyle(fontWeight: FontWeight.bold)),
+                  const SizedBox(height: 6),
+                  DropdownButtonFormField<String>(
+                    initialValue: _terminalTheme,
+                    decoration: const InputDecoration(
+                      border: OutlineInputBorder(),
+                      contentPadding: EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                    ),
+                    items: AnsiThemes.all.keys.map((themeName) {
+                      return DropdownMenuItem(
+                        value: themeName,
+                        child: Text(themeName),
+                      );
+                    }).toList(),
+                    onChanged: (val) {
+                      if (val != null) {
+                        setState(() => _terminalTheme = val);
+                      }
+                    },
+                  ),
+                ],
                 const SizedBox(height: 12),
                 const Text('Authentication Method', style: TextStyle(fontWeight: FontWeight.bold)),
                 Row(

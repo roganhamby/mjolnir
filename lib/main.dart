@@ -2,6 +2,7 @@ import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:file_picker/file_picker.dart';
 import 'models/server_config.dart';
 import 'services/sync_storage_provider.dart';
@@ -76,6 +77,7 @@ class _MainScreenState extends State<MainScreen> {
 
   final List<TabItem> _openTabs = [];
   int _activeTabIndex = -1;
+  bool _isSidebarCollapsed = false;
 
   final TextEditingController _masterPasswordController = TextEditingController();
   bool _isDerivingKey = false;
@@ -133,6 +135,9 @@ class _MainScreenState extends State<MainScreen> {
 
   void _openTerminalTab(ServerConfig server) {
     final tabId = 'term-${server.id}-${DateTime.now().millisecondsSinceEpoch}';
+    final themeToUse = server.terminalTheme.isNotEmpty
+        ? server.terminalTheme
+        : 'Default Dark';
     setState(() {
       _openTabs.add(
         TabItem(
@@ -142,11 +147,12 @@ class _MainScreenState extends State<MainScreen> {
           color: null,
           type: 'ssh',
           server: server,
-          themeName: server.terminalTheme,
+          themeName: themeToUse,
           fontSize: server.terminalFontSize,
         ),
       );
       _activeTabIndex = _openTabs.length - 1;
+      _currentThemeName = themeToUse;
     });
   }
 
@@ -184,6 +190,9 @@ class _MainScreenState extends State<MainScreen> {
           _activeTabIndex = -1;
         } else if (_activeTabIndex >= _openTabs.length) {
           _activeTabIndex = _openTabs.length - 1;
+        }
+        if (_activeTabIndex >= 0 && _openTabs[_activeTabIndex].type == 'ssh') {
+          _currentThemeName = _openTabs[_activeTabIndex].themeName;
         }
       });
     }
@@ -283,6 +292,9 @@ class _MainScreenState extends State<MainScreen> {
                   tab.title = titleController.text.trim().isEmpty ? tab.title : titleController.text.trim();
                   tab.color = selectedColor;
                   tab.themeName = selectedTheme;
+                  if (_activeTabIndex >= 0 && _openTabs[_activeTabIndex] == tab) {
+                    _currentThemeName = selectedTheme;
+                  }
                 });
                 // Persist theme to server config
                 if (tab.type == 'ssh') {
@@ -441,95 +453,97 @@ class _MainScreenState extends State<MainScreen> {
       return _buildUnlockScreen();
     }
 
-    return Scaffold(
-      appBar: AppBar(
-        title: Row(
-          children: [
-            Image.asset(
-              'assets/app_icon.png',
-              width: 24,
-              height: 24,
-              errorBuilder: (_, __, ___) => const Icon(Icons.bolt, color: Colors.amberAccent, size: 22),
+    return CallbackShortcuts(
+      bindings: {
+        const SingleActivator(LogicalKeyboardKey.keyB, meta: true): () {
+          setState(() => _isSidebarCollapsed = !_isSidebarCollapsed);
+        },
+        const SingleActivator(LogicalKeyboardKey.keyB, control: true): () {
+          setState(() => _isSidebarCollapsed = !_isSidebarCollapsed);
+        },
+      },
+      child: Scaffold(
+        appBar: AppBar(
+          leading: IconButton(
+            icon: Icon(
+              _isSidebarCollapsed ? Icons.view_sidebar_outlined : Icons.view_sidebar,
+              size: 20,
+            ),
+            tooltip: _isSidebarCollapsed
+                ? 'Expand Sidebar (${Platform.isMacOS ? "⌘B" : "Ctrl+B"})'
+                : 'Collapse Sidebar (${Platform.isMacOS ? "⌘B" : "Ctrl+B"})',
+            onPressed: () => setState(() => _isSidebarCollapsed = !_isSidebarCollapsed),
+          ),
+          title: Row(
+            children: [
+              Image.asset(
+                'assets/app_icon.png',
+                width: 24,
+                height: 24,
+                errorBuilder: (_, __, ___) => const Icon(Icons.bolt, color: Colors.amberAccent, size: 22),
+              ),
+              const SizedBox(width: 8),
+              const Text('Mjölnir', style: TextStyle(fontSize: 17, fontWeight: FontWeight.bold)),
+              const SizedBox(width: 8),
+              const Text('• SSH & SFTP', style: TextStyle(fontSize: 12, color: Colors.grey)),
+            ],
+          ),
+          actions: [
+            IconButton(
+              icon: const Icon(Icons.file_upload_outlined, size: 20),
+              tooltip: 'Import JSON Connections',
+              onPressed: _importVault,
+            ),
+            IconButton(
+              icon: const Icon(Icons.file_download_outlined, size: 20),
+              tooltip: 'Export JSON Connections',
+              onPressed: _exportVault,
+            ),
+            IconButton(
+              icon: const Icon(Icons.add, size: 20),
+              tooltip: 'Add Server',
+              onPressed: () => _showAddOrEditServerDialog(),
+            ),
+            IconButton(
+              icon: const Icon(Icons.lock_outline, size: 20),
+              tooltip: 'Lock Vault',
+              onPressed: () {
+                setState(() {
+                  _openTabs.clear();
+                  _activeTabIndex = -1;
+                  _vaultManager.lock();
+                });
+              },
             ),
             const SizedBox(width: 8),
-            const Text('Mjölnir', style: TextStyle(fontSize: 17, fontWeight: FontWeight.bold)),
-            const SizedBox(width: 8),
-            const Text('• SSH & SFTP', style: TextStyle(fontSize: 12, color: Colors.grey)),
           ],
         ),
-        actions: [
-          // Theme Selector Menu
-          PopupMenuButton<String>(
-            tooltip: 'ANSI Color Scheme',
-            icon: const Icon(Icons.palette_outlined, size: 20),
-            onSelected: (themeName) {
-              setState(() {
-                _currentThemeName = themeName;
-              });
-            },
-            itemBuilder: (context) {
-              return AnsiThemes.all.keys.map((name) {
-                return PopupMenuItem(
-                  value: name,
-                  child: Row(
-                    children: [
-                      if (name == _currentThemeName)
-                        const Icon(Icons.check, size: 16, color: Colors.amberAccent)
-                      else
-                        const SizedBox(width: 16),
-                      const SizedBox(width: 8),
-                      Text(name),
-                    ],
-                  ),
-                );
-              }).toList();
-            },
-          ),
-          IconButton(
-            icon: const Icon(Icons.file_upload_outlined, size: 20),
-            tooltip: 'Import JSON Connections',
-            onPressed: _importVault,
-          ),
-          IconButton(
-            icon: const Icon(Icons.file_download_outlined, size: 20),
-            tooltip: 'Export JSON Connections',
-            onPressed: _exportVault,
-          ),
-          IconButton(
-            icon: const Icon(Icons.add, size: 20),
-            tooltip: 'Add Server',
-            onPressed: () => _showAddOrEditServerDialog(),
-          ),
-          IconButton(
-            icon: const Icon(Icons.lock_outline, size: 20),
-            tooltip: 'Lock Vault',
-            onPressed: () {
-              setState(() {
-                _openTabs.clear();
-                _activeTabIndex = -1;
-                _vaultManager.lock();
-              });
-            },
-          ),
-          const SizedBox(width: 8),
-        ],
-      ),
-      body: Row(
-        children: [
-          // Sidebar: Server List
-          SizedBox(
-            width: 280,
-            child: Container(
-              color: const Color(0xFF252526),
-              child: _buildSidebar(),
+        body: Row(
+          children: [
+            // Collapsible Sidebar: Server List
+            AnimatedContainer(
+              duration: const Duration(milliseconds: 200),
+              curve: Curves.easeInOut,
+              width: _isSidebarCollapsed ? 0 : 280,
+              clipBehavior: Clip.hardEdge,
+              decoration: const BoxDecoration(
+                color: Color(0xFF252526),
+              ),
+              child: OverflowBox(
+                minWidth: 280,
+                maxWidth: 280,
+                alignment: Alignment.topLeft,
+                child: _buildSidebar(),
+              ),
             ),
-          ),
-          const VerticalDivider(width: 1, thickness: 1, color: Color(0xFF333333)),
-          // Workspace: Tabs and Session View
-          Expanded(
-            child: _buildWorkspace(),
-          ),
-        ],
+            if (!_isSidebarCollapsed)
+              const VerticalDivider(width: 1, thickness: 1, color: Color(0xFF333333)),
+            // Workspace: Tabs and Session View
+            Expanded(
+              child: _buildWorkspace(),
+            ),
+          ],
+        ),
       ),
     );
   }
@@ -601,103 +615,156 @@ class _MainScreenState extends State<MainScreen> {
   Widget _buildSidebar() {
     final servers = _vaultManager.servers;
 
-    if (servers.isEmpty) {
-      return Center(
-        child: Padding(
-          padding: const EdgeInsets.all(16.0),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
+    return Column(
+      children: [
+        // Sidebar Header
+        Container(
+          height: 38,
+          padding: const EdgeInsets.symmetric(horizontal: 12),
+          decoration: const BoxDecoration(
+            color: Color(0xFF1E1E1E),
+            border: Border(bottom: BorderSide(color: Color(0xFF333333))),
+          ),
+          child: Row(
             children: [
-              const Icon(Icons.dns_outlined, size: 40, color: Colors.grey),
-              const SizedBox(height: 8),
-              const Text('No servers yet', style: TextStyle(color: Colors.grey)),
-              const SizedBox(height: 12),
-              ElevatedButton.icon(
-                icon: const Icon(Icons.add, size: 16),
-                label: const Text('Add First Server'),
+              const Icon(Icons.dns, size: 14, color: Colors.amberAccent),
+              const SizedBox(width: 8),
+              Text(
+                'SERVERS (${servers.length})',
+                style: const TextStyle(
+                  fontSize: 11,
+                  fontWeight: FontWeight.bold,
+                  letterSpacing: 0.8,
+                  color: Colors.grey,
+                ),
+              ),
+              const Spacer(),
+              IconButton(
+                icon: const Icon(Icons.add, size: 16, color: Colors.grey),
+                tooltip: 'Add Server',
+                padding: EdgeInsets.zero,
+                constraints: const BoxConstraints(minWidth: 24, minHeight: 24),
                 onPressed: () => _showAddOrEditServerDialog(),
+              ),
+              const SizedBox(width: 4),
+              IconButton(
+                icon: const Icon(Icons.chevron_left, size: 18, color: Colors.grey),
+                tooltip: 'Collapse Sidebar (${Platform.isMacOS ? "⌘B" : "Ctrl+B"})',
+                padding: EdgeInsets.zero,
+                constraints: const BoxConstraints(minWidth: 24, minHeight: 24),
+                onPressed: () => setState(() => _isSidebarCollapsed = true),
               ),
             ],
           ),
         ),
-      );
-    }
+        // Server List Content
+        Expanded(
+          child: servers.isEmpty
+              ? Center(
+                  child: Padding(
+                    padding: const EdgeInsets.all(16.0),
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        const Icon(Icons.dns_outlined, size: 40, color: Colors.grey),
+                        const SizedBox(height: 8),
+                        const Text('No servers yet', style: TextStyle(color: Colors.grey)),
+                        const SizedBox(height: 12),
+                        ElevatedButton.icon(
+                          icon: const Icon(Icons.add, size: 16),
+                          label: const Text('Add First Server'),
+                          onPressed: () => _showAddOrEditServerDialog(),
+                        ),
+                      ],
+                    ),
+                  ),
+                )
+              : ListView.builder(
+                  itemCount: servers.length,
+                  itemBuilder: (context, index) {
+                    final server = servers[index];
+                    final isSftp = server.connectionType == ConnectionType.sftp;
 
-    return ListView.builder(
-      itemCount: servers.length,
-      itemBuilder: (context, index) {
-        final server = servers[index];
-        final isSftp = server.connectionType == ConnectionType.sftp;
-
-        return ListTile(
-          dense: true,
-          leading: Icon(
-            isSftp ? Icons.folder_shared : Icons.computer,
-            size: 20,
-            color: Colors.amberAccent,
-          ),
-          title: Row(
-            children: [
-              Expanded(
-                child: Text(server.name, style: const TextStyle(fontWeight: FontWeight.w600)),
-              ),
-              Container(
-                padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
-                decoration: BoxDecoration(
-                  color: isSftp ? Colors.blueGrey.withAlpha(80) : Colors.amber.withAlpha(60),
-                  borderRadius: BorderRadius.circular(4),
+                    return ListTile(
+                      dense: true,
+                      leading: Icon(
+                        isSftp ? Icons.folder_shared : Icons.computer,
+                        size: 20,
+                        color: Colors.amberAccent,
+                      ),
+                      title: Row(
+                        children: [
+                          Expanded(
+                            child: Text(server.name, style: const TextStyle(fontWeight: FontWeight.w600)),
+                          ),
+                          Container(
+                            padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                            decoration: BoxDecoration(
+                              color: isSftp ? Colors.blueGrey.withAlpha(80) : Colors.amber.withAlpha(60),
+                              borderRadius: BorderRadius.circular(4),
+                            ),
+                            child: Text(
+                              isSftp ? 'SFTP' : 'SSH',
+                              style: const TextStyle(fontSize: 9, fontWeight: FontWeight.bold),
+                            ),
+                          ),
+                        ],
+                      ),
+                      subtitle: Text('${server.username}@${server.host}:${server.port}',
+                          style: const TextStyle(fontSize: 11)),
+                      trailing: PopupMenuButton<String>(
+                        icon: const Icon(Icons.more_vert, size: 16),
+                        onSelected: (val) {
+                          if (val == 'launch') _launchServerDefault(server);
+                          if (val == 'ssh') _openTerminalTab(server);
+                          if (val == 'sftp') _openSftpTab(server);
+                          if (val == 'edit') _showAddOrEditServerDialog(server);
+                          if (val == 'delete') _confirmDeleteServer(server);
+                        },
+                        itemBuilder: (context) => [
+                          PopupMenuItem(
+                            value: 'launch',
+                            child: Text('Connect (${isSftp ? 'SFTP' : 'SSH'})'),
+                          ),
+                          const PopupMenuItem(value: 'ssh', child: Text('Open SSH Terminal')),
+                          const PopupMenuItem(value: 'sftp', child: Text('Open SFTP Browser')),
+                          const PopupMenuDivider(),
+                          const PopupMenuItem(value: 'edit', child: Text('Edit')),
+                          const PopupMenuItem(
+                            value: 'delete',
+                            child: Text('Delete', style: TextStyle(color: Colors.redAccent)),
+                          ),
+                        ],
+                      ),
+                      onTap: () => _launchServerDefault(server),
+                    );
+                  },
                 ),
-                child: Text(
-                  isSftp ? 'SFTP' : 'SSH',
-                  style: const TextStyle(fontSize: 9, fontWeight: FontWeight.bold),
-                ),
-              ),
-            ],
-          ),
-          subtitle: Text('${server.username}@${server.host}:${server.port}',
-              style: const TextStyle(fontSize: 11)),
-          trailing: PopupMenuButton<String>(
-            icon: const Icon(Icons.more_vert, size: 16),
-            onSelected: (val) {
-              if (val == 'launch') _launchServerDefault(server);
-              if (val == 'ssh') _openTerminalTab(server);
-              if (val == 'sftp') _openSftpTab(server);
-              if (val == 'edit') _showAddOrEditServerDialog(server);
-              if (val == 'delete') _confirmDeleteServer(server);
-            },
-            itemBuilder: (context) => [
-              PopupMenuItem(
-                value: 'launch',
-                child: Text('Connect (${isSftp ? 'SFTP' : 'SSH'})'),
-              ),
-              const PopupMenuItem(value: 'ssh', child: Text('Open SSH Terminal')),
-              const PopupMenuItem(value: 'sftp', child: Text('Open SFTP Browser')),
-              const PopupMenuDivider(),
-              const PopupMenuItem(value: 'edit', child: Text('Edit')),
-              const PopupMenuItem(
-                value: 'delete',
-                child: Text('Delete', style: TextStyle(color: Colors.redAccent)),
-              ),
-            ],
-          ),
-          onTap: () => _launchServerDefault(server),
-        );
-      },
+        ),
+      ],
     );
   }
 
   Widget _buildWorkspace() {
     if (_openTabs.isEmpty) {
-      return const Center(
+      return Center(
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            Icon(Icons.terminal_outlined, size: 56, color: Colors.grey),
-            SizedBox(height: 12),
-            Text(
+            const Icon(Icons.terminal_outlined, size: 56, color: Colors.grey),
+            const SizedBox(height: 12),
+            const Text(
               'Select a server from the sidebar to launch an SSH terminal or SFTP browser.',
               style: TextStyle(color: Colors.grey),
             ),
+            if (_isSidebarCollapsed) ...[
+              const SizedBox(height: 16),
+              ElevatedButton.icon(
+                icon: const Icon(Icons.view_sidebar, size: 16),
+                label: const Text('Show Sidebar'),
+                onPressed: () => setState(() => _isSidebarCollapsed = false),
+              ),
+            ],
           ],
         ),
       );
@@ -709,66 +776,85 @@ class _MainScreenState extends State<MainScreen> {
         Container(
           height: 38,
           color: const Color(0xFF1E1E1E),
-          child: ListView.builder(
-            scrollDirection: Axis.horizontal,
-            itemCount: _openTabs.length,
-            itemBuilder: (context, index) {
-              final tab = _openTabs[index];
-              final isActive = index == _activeTabIndex;
-              final tabHighlightColor = tab.color ?? (isActive ? Colors.amberAccent : Colors.transparent);
+          child: Row(
+            children: [
+              if (_isSidebarCollapsed)
+                IconButton(
+                  icon: const Icon(Icons.chevron_right, size: 18, color: Colors.grey),
+                  tooltip: 'Expand Sidebar (${Platform.isMacOS ? "⌘B" : "Ctrl+B"})',
+                  padding: EdgeInsets.zero,
+                  constraints: const BoxConstraints(minWidth: 32, minHeight: 38),
+                  onPressed: () => setState(() => _isSidebarCollapsed = false),
+                ),
+              Expanded(
+                child: ListView.builder(
+                  scrollDirection: Axis.horizontal,
+                  itemCount: _openTabs.length,
+                  itemBuilder: (context, index) {
+                    final tab = _openTabs[index];
+                    final isActive = index == _activeTabIndex;
+                    final tabHighlightColor = tab.color ?? (isActive ? Colors.amberAccent : Colors.transparent);
 
-              return GestureDetector(
-                onTap: () => setState(() => _activeTabIndex = index),
-                onSecondaryTap: () => _renameAndRecolorTab(tab),
-                child: Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 12),
-                  decoration: BoxDecoration(
-                    color: isActive ? const Color(0xFF252526) : const Color(0xFF1E1E1E),
-                    border: Border(
-                      top: BorderSide(
-                        color: tabHighlightColor,
-                        width: tab.color != null ? 3 : 2,
-                      ),
-                      right: const BorderSide(color: Color(0xFF333333)),
-                    ),
-                  ),
-                  child: Row(
-                    children: [
-                      if (tab.color != null)
-                        Container(
-                          width: 8,
-                          height: 8,
-                          margin: const EdgeInsets.only(right: 6),
-                          decoration: BoxDecoration(
-                            color: tab.color,
-                            shape: BoxShape.circle,
+                    return GestureDetector(
+                      onTap: () => setState(() {
+                        _activeTabIndex = index;
+                        if (tab.type == 'ssh') {
+                          _currentThemeName = tab.themeName;
+                        }
+                      }),
+                      onSecondaryTap: () => _renameAndRecolorTab(tab),
+                      child: Container(
+                        padding: const EdgeInsets.symmetric(horizontal: 12),
+                        decoration: BoxDecoration(
+                          color: isActive ? const Color(0xFF252526) : const Color(0xFF1E1E1E),
+                          border: Border(
+                            top: BorderSide(
+                              color: tabHighlightColor,
+                              width: tab.color != null ? 3 : 2,
+                            ),
+                            right: const BorderSide(color: Color(0xFF333333)),
                           ),
                         ),
-                      Icon(tab.icon, size: 14, color: isActive ? Colors.white : Colors.grey),
-                      const SizedBox(width: 8),
-                      Text(
-                        tab.title,
-                        style: TextStyle(
-                          fontSize: 12,
-                          color: isActive ? Colors.white : Colors.grey,
-                          fontWeight: isActive ? FontWeight.bold : FontWeight.normal,
+                        child: Row(
+                          children: [
+                            if (tab.color != null)
+                              Container(
+                                width: 8,
+                                height: 8,
+                                margin: const EdgeInsets.only(right: 6),
+                                decoration: BoxDecoration(
+                                  color: tab.color,
+                                  shape: BoxShape.circle,
+                                ),
+                              ),
+                            Icon(tab.icon, size: 14, color: isActive ? Colors.white : Colors.grey),
+                            const SizedBox(width: 8),
+                            Text(
+                              tab.title,
+                              style: TextStyle(
+                                fontSize: 12,
+                                color: isActive ? Colors.white : Colors.grey,
+                                fontWeight: isActive ? FontWeight.bold : FontWeight.normal,
+                              ),
+                            ),
+                            const SizedBox(width: 6),
+                            InkWell(
+                              onTap: () => _renameAndRecolorTab(tab),
+                              child: const Icon(Icons.edit, size: 12, color: Colors.grey),
+                            ),
+                            const SizedBox(width: 6),
+                            InkWell(
+                              onTap: () => _closeTab(tab.id),
+                              child: const Icon(Icons.close, size: 14, color: Colors.grey),
+                            ),
+                          ],
                         ),
                       ),
-                      const SizedBox(width: 6),
-                      InkWell(
-                        onTap: () => _renameAndRecolorTab(tab),
-                        child: const Icon(Icons.edit, size: 12, color: Colors.grey),
-                      ),
-                      const SizedBox(width: 6),
-                      InkWell(
-                        onTap: () => _closeTab(tab.id),
-                        child: const Icon(Icons.close, size: 14, color: Colors.grey),
-                      ),
-                    ],
-                  ),
+                    );
+                  },
                 ),
-              );
-            },
+              ),
+            ],
           ),
         ),
         // Active Tab View Content
@@ -778,14 +864,20 @@ class _MainScreenState extends State<MainScreen> {
             children: _openTabs.map((t) {
               if (t.type == 'ssh') {
                 return TerminalTabWidget(
-                  key: ValueKey(t.id + t.themeName),
+                  key: ValueKey(t.id),
                   server: t.server,
                   sshService: _sshService,
-                  theme: AnsiThemes.all[t.themeName] ?? TerminalThemes.defaultTheme,
+                  theme: AnsiThemes.all[t.server.terminalTheme] ?? AnsiThemes.all[t.themeName] ?? TerminalThemes.defaultTheme,
+                  initialThemeName: t.server.terminalTheme.isNotEmpty ? t.server.terminalTheme : t.themeName,
                   fontSize: t.fontSize,
                   onFontSizeChanged: (newSize) async {
                     t.fontSize = newSize;
                     t.server.terminalFontSize = newSize;
+                    await _vaultManager.saveServer(t.server);
+                  },
+                  onThemeChanged: (newThemeName) async {
+                    t.themeName = newThemeName;
+                    t.server.terminalTheme = newThemeName;
                     await _vaultManager.saveServer(t.server);
                   },
                   onClose: () => _closeTab(t.id),
