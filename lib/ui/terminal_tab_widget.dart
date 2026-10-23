@@ -128,7 +128,7 @@ class _TerminalTabWidgetState extends State<TerminalTabWidget>
     // unwrapping/wrapping lines when going full screen keeps cursorY aligned
     // with the actual prompt line and resets full-height vertical margins.
     CellAnchor? cursorAnchor;
-    if (!terminal.isUsingAltBuffer && terminal.mainBuffer.lines.isNotEmpty) {
+    if (!terminal.isUsingAltBuffer && terminal.mainBuffer.lines.length > 0) {
       final absY = terminal.mainBuffer.absoluteCursorY.clamp(
         0,
         terminal.mainBuffer.lines.length - 1,
