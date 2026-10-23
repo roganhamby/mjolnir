@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
 import 'package:uuid/uuid.dart';
 import '../models/task_item.dart';
+import '../theme/app_color_schemes.dart';
 
 class AssignableTabInfo {
   final String id;
@@ -53,6 +54,7 @@ class _AssignedTabTaskBannerState extends State<AssignedTabTaskBanner> {
 
   @override
   Widget build(BuildContext context) {
+    final scheme = AppColorScheme.of(context);
     final task = widget.task;
     final isOverdue = task.isOverdue;
     final dueDateStr = task.dueDate != null
@@ -65,7 +67,7 @@ class _AssignedTabTaskBannerState extends State<AssignedTabTaskBanner> {
       decoration: BoxDecoration(
         color: isOverdue
             ? Colors.redAccent.withAlpha(35)
-            : const Color(0xFF323233),
+            : scheme.elevatedSurface,
         borderRadius: BorderRadius.circular(6),
         border: Border.all(
           color: isOverdue
@@ -85,7 +87,7 @@ class _AssignedTabTaskBannerState extends State<AssignedTabTaskBanner> {
               onChanged: (_) => widget.onCompleteTask(),
               visualDensity: VisualDensity.compact,
               side: BorderSide(
-                color: isOverdue ? Colors.redAccent : Colors.grey.shade400,
+                color: isOverdue ? Colors.redAccent : scheme.mutedText,
                 width: 1.5,
               ),
             ),
@@ -117,7 +119,7 @@ class _AssignedTabTaskBannerState extends State<AssignedTabTaskBanner> {
                 style: TextStyle(
                   fontSize: 12,
                   fontWeight: FontWeight.w600,
-                  color: isOverdue ? Colors.redAccent.shade100 : Colors.white,
+                  color: isOverdue ? Colors.redAccent.shade100 : scheme.primaryText,
                 ),
                 overflow: TextOverflow.ellipsis,
               ),
@@ -128,7 +130,7 @@ class _AssignedTabTaskBannerState extends State<AssignedTabTaskBanner> {
             Icon(
               isOverdue ? Icons.warning_amber_rounded : Icons.schedule,
               size: 12,
-              color: isOverdue ? Colors.redAccent : Colors.grey.shade400,
+              color: isOverdue ? Colors.redAccent : scheme.mutedText,
             ),
             const SizedBox(width: 3),
             Text(
@@ -136,7 +138,7 @@ class _AssignedTabTaskBannerState extends State<AssignedTabTaskBanner> {
               style: TextStyle(
                 fontSize: 11,
                 fontWeight: isOverdue ? FontWeight.bold : FontWeight.normal,
-                color: isOverdue ? Colors.redAccent : Colors.grey.shade300,
+                color: isOverdue ? Colors.redAccent : scheme.mutedText,
               ),
             ),
           ],
@@ -151,7 +153,7 @@ class _AssignedTabTaskBannerState extends State<AssignedTabTaskBanner> {
                 child: Icon(
                   Icons.close,
                   size: 13,
-                  color: Colors.grey.shade400,
+                  color: scheme.mutedText,
                 ),
               ),
             ),
@@ -441,6 +443,7 @@ class _TaskManagerTabWidgetState extends State<TaskManagerTabWidget> {
 
   @override
   Widget build(BuildContext context) {
+    final scheme = AppColorScheme.of(context);
     final sortedTasks = _getSortedTasks();
     final validNewTaskTabId = widget.availableTabs.any((t) => t.id == _newTaskAssignedTabId)
         ? _newTaskAssignedTabId
@@ -453,34 +456,34 @@ class _TaskManagerTabWidgetState extends State<TaskManagerTabWidget> {
         // Top Header & Add Task Bar
         Container(
           padding: const EdgeInsets.all(14),
-          decoration: const BoxDecoration(
-            color: Color(0xFF252526),
-            border: Border(bottom: BorderSide(color: Color(0xFF333333))),
+          decoration: BoxDecoration(
+            color: scheme.panelBackground,
+            border: Border(bottom: BorderSide(color: scheme.borderColor)),
           ),
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
               Row(
                 children: [
-                  const Icon(Icons.task_alt, color: Colors.amberAccent, size: 18),
+                  Icon(Icons.task_alt, color: scheme.accentColor, size: 18),
                   const SizedBox(width: 8),
                   Text(
                     'Task Manager (${widget.tasks.length} Active)',
-                    style: const TextStyle(
+                    style: TextStyle(
                       fontSize: 14,
                       fontWeight: FontWeight.bold,
-                      color: Colors.white,
+                      color: scheme.primaryText,
                     ),
                   ),
                   const Spacer(),
-                  const Text('Sort by: ', style: TextStyle(fontSize: 12, color: Colors.grey)),
+                  Text('Sort by: ', style: TextStyle(fontSize: 12, color: scheme.mutedText)),
                   const SizedBox(width: 4),
                   DropdownButton<String>(
                     value: _sortBy,
                     isDense: true,
                     underline: const SizedBox.shrink(),
-                    style: const TextStyle(fontSize: 12, color: Colors.white),
-                    dropdownColor: const Color(0xFF2D2D2D),
+                    style: TextStyle(fontSize: 12, color: scheme.primaryText),
+                    dropdownColor: scheme.elevatedSurface,
                     items: const [
                       DropdownMenuItem(value: 'created', child: Text('Newest First')),
                       DropdownMenuItem(value: 'importance', child: Text('Importance')),
@@ -517,14 +520,14 @@ class _TaskManagerTabWidgetState extends State<TaskManagerTabWidget> {
                   Container(
                     padding: const EdgeInsets.symmetric(horizontal: 10),
                     decoration: BoxDecoration(
-                      border: Border.all(color: Colors.grey.shade700),
+                      border: Border.all(color: scheme.borderColor),
                       borderRadius: BorderRadius.circular(4),
                     ),
                     child: DropdownButtonHideUnderline(
                       child: DropdownButton<TaskImportance>(
                         value: _newTaskImportance,
                         isDense: true,
-                        dropdownColor: const Color(0xFF2D2D2D),
+                        dropdownColor: scheme.elevatedSurface,
                         items: TaskImportance.values.map((imp) {
                           return DropdownMenuItem(
                             value: imp,
@@ -554,7 +557,7 @@ class _TaskManagerTabWidgetState extends State<TaskManagerTabWidget> {
                     icon: Icon(
                       Icons.schedule,
                       size: 15,
-                      color: isNewTaskOverdue ? Colors.redAccent : Colors.amberAccent,
+                      color: isNewTaskOverdue ? Colors.redAccent : scheme.accentColor,
                     ),
                     label: Text(
                       _newTaskDueDate != null
@@ -562,7 +565,7 @@ class _TaskManagerTabWidgetState extends State<TaskManagerTabWidget> {
                           : 'Due Date & Time',
                       style: TextStyle(
                         fontSize: 12,
-                        color: isNewTaskOverdue ? Colors.redAccent : Colors.white,
+                        color: isNewTaskOverdue ? Colors.redAccent : scheme.primaryText,
                         fontWeight: isNewTaskOverdue ? FontWeight.bold : FontWeight.normal,
                       ),
                     ),
@@ -585,7 +588,7 @@ class _TaskManagerTabWidgetState extends State<TaskManagerTabWidget> {
                   Container(
                     padding: const EdgeInsets.symmetric(horizontal: 10),
                     decoration: BoxDecoration(
-                      border: Border.all(color: Colors.grey.shade700),
+                      border: Border.all(color: scheme.borderColor),
                       borderRadius: BorderRadius.circular(4),
                     ),
                     child: DropdownButtonHideUnderline(
@@ -593,11 +596,11 @@ class _TaskManagerTabWidgetState extends State<TaskManagerTabWidget> {
                         value: validNewTaskTabId,
                         hint: const Text('Assign to Tab', style: TextStyle(fontSize: 12)),
                         isDense: true,
-                        dropdownColor: const Color(0xFF2D2D2D),
+                        dropdownColor: scheme.elevatedSurface,
                         items: [
-                          const DropdownMenuItem<String?>(
+                          DropdownMenuItem<String?>(
                             value: null,
-                            child: Text('Unassigned', style: TextStyle(fontSize: 12, color: Colors.grey)),
+                            child: Text('Unassigned', style: TextStyle(fontSize: 12, color: scheme.mutedText)),
                           ),
                           ...widget.availableTabs.map((tab) {
                             return DropdownMenuItem<String?>(
@@ -608,7 +611,7 @@ class _TaskManagerTabWidgetState extends State<TaskManagerTabWidget> {
                                   Icon(
                                     tab.type == 'sftp' ? Icons.folder_shared : Icons.terminal,
                                     size: 14,
-                                    color: Colors.amberAccent,
+                                    color: scheme.accentColor,
                                   ),
                                   const SizedBox(width: 6),
                                   Text(tab.title, style: const TextStyle(fontSize: 12)),
@@ -639,11 +642,11 @@ class _TaskManagerTabWidgetState extends State<TaskManagerTabWidget> {
                   child: Column(
                     mainAxisSize: MainAxisSize.min,
                     children: [
-                      Icon(Icons.check_circle_outline, size: 52, color: Colors.grey.shade600),
+                      Icon(Icons.check_circle_outline, size: 52, color: scheme.mutedText),
                       const SizedBox(height: 12),
-                      const Text(
+                      Text(
                         'No active tasks. Add a task above and optionally assign it to an SSH or SFTP tab.',
-                        style: TextStyle(color: Colors.grey),
+                        style: TextStyle(color: scheme.mutedText),
                       ),
                     ],
                   ),
@@ -670,7 +673,7 @@ class _TaskManagerTabWidgetState extends State<TaskManagerTabWidget> {
                         child: DropdownButton<TaskImportance>(
                           value: task.importance,
                           isDense: true,
-                          dropdownColor: const Color(0xFF2D2D2D),
+                          dropdownColor: scheme.elevatedSurface,
                           items: TaskImportance.values.map((imp) {
                             return DropdownMenuItem(
                               value: imp,
@@ -715,12 +718,12 @@ class _TaskManagerTabWidgetState extends State<TaskManagerTabWidget> {
                         decoration: BoxDecoration(
                           color: isOverdue
                               ? Colors.redAccent.withAlpha(40)
-                              : const Color(0xFF1E1E1E),
+                              : scheme.scaffoldBackground,
                           borderRadius: BorderRadius.circular(6),
                           border: Border.all(
                             color: isOverdue
                                 ? Colors.redAccent
-                                : Colors.grey.shade800,
+                                : scheme.borderColor,
                           ),
                         ),
                         child: Row(
@@ -729,7 +732,7 @@ class _TaskManagerTabWidgetState extends State<TaskManagerTabWidget> {
                             Icon(
                               isOverdue ? Icons.error_outline : Icons.schedule,
                               size: 14,
-                              color: isOverdue ? Colors.redAccent : Colors.grey.shade400,
+                              color: isOverdue ? Colors.redAccent : scheme.mutedText,
                             ),
                             const SizedBox(width: 5),
                             Text(
@@ -741,7 +744,7 @@ class _TaskManagerTabWidgetState extends State<TaskManagerTabWidget> {
                                 fontWeight: isOverdue ? FontWeight.bold : FontWeight.normal,
                                 color: isOverdue
                                     ? Colors.redAccent
-                                    : (task.dueDate != null ? Colors.grey.shade200 : Colors.grey),
+                                    : (task.dueDate != null ? scheme.primaryText : scheme.mutedText),
                               ),
                             ),
                           ],
@@ -752,29 +755,29 @@ class _TaskManagerTabWidgetState extends State<TaskManagerTabWidget> {
                     final tabAssignmentBadge = Container(
                       padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
                       decoration: BoxDecoration(
-                        color: const Color(0xFF1E1E1E),
+                        color: scheme.scaffoldBackground,
                         borderRadius: BorderRadius.circular(6),
                         border: Border.all(
                           color: assignedTab != null
-                              ? Colors.amberAccent.withAlpha(120)
-                              : Colors.grey.shade800,
+                              ? scheme.accentColor.withAlpha(120)
+                              : scheme.borderColor,
                         ),
                       ),
                       child: DropdownButtonHideUnderline(
                         child: DropdownButton<String?>(
                           value: assignedTab?.id,
-                          hint: const Text(
+                          hint: Text(
                             'Assign Tab',
-                            style: TextStyle(fontSize: 11, color: Colors.grey),
+                            style: TextStyle(fontSize: 11, color: scheme.mutedText),
                           ),
                           isDense: true,
-                          dropdownColor: const Color(0xFF2D2D2D),
+                          dropdownColor: scheme.elevatedSurface,
                           items: [
-                            const DropdownMenuItem<String?>(
+                            DropdownMenuItem<String?>(
                               value: null,
                               child: Text(
                                 'Unassigned',
-                                style: TextStyle(fontSize: 11, color: Colors.grey),
+                                style: TextStyle(fontSize: 11, color: scheme.mutedText),
                               ),
                             ),
                             ...widget.availableTabs.map((tab) {
@@ -788,12 +791,12 @@ class _TaskManagerTabWidgetState extends State<TaskManagerTabWidget> {
                                           ? Icons.folder_shared
                                           : Icons.terminal,
                                       size: 13,
-                                      color: Colors.amberAccent,
+                                      color: scheme.accentColor,
                                     ),
                                     const SizedBox(width: 5),
                                     Text(
                                       tab.title,
-                                      style: const TextStyle(fontSize: 11, color: Colors.white),
+                                      style: TextStyle(fontSize: 11, color: scheme.primaryText),
                                     ),
                                   ],
                                 ),
@@ -810,12 +813,12 @@ class _TaskManagerTabWidgetState extends State<TaskManagerTabWidget> {
                     return Container(
                       padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
                       decoration: BoxDecoration(
-                        color: const Color(0xFF252526),
+                        color: scheme.panelBackground,
                         borderRadius: BorderRadius.circular(8),
                         border: Border.all(
                           color: isOverdue
                               ? Colors.redAccent.withAlpha(160)
-                              : const Color(0xFF383838),
+                              : scheme.borderColor,
                         ),
                       ),
                       child: LayoutBuilder(
@@ -837,15 +840,15 @@ class _TaskManagerTabWidgetState extends State<TaskManagerTabWidget> {
                                     Expanded(
                                       child: Text(
                                         task.title,
-                                        style: const TextStyle(
+                                        style: TextStyle(
                                           fontSize: 14,
                                           fontWeight: FontWeight.w500,
-                                          color: Colors.white,
+                                          color: scheme.primaryText,
                                         ),
                                       ),
                                     ),
                                     IconButton(
-                                      icon: const Icon(Icons.edit_outlined, size: 16, color: Colors.grey),
+                                      icon: Icon(Icons.edit_outlined, size: 16, color: scheme.mutedText),
                                       tooltip: 'Edit Task',
                                       onPressed: () => _showEditTaskDialog(task),
                                     ),
@@ -883,10 +886,10 @@ class _TaskManagerTabWidgetState extends State<TaskManagerTabWidget> {
                               Expanded(
                                 child: Text(
                                   task.title,
-                                  style: const TextStyle(
+                                  style: TextStyle(
                                     fontSize: 14,
                                     fontWeight: FontWeight.w500,
-                                    color: Colors.white,
+                                    color: scheme.primaryText,
                                   ),
                                 ),
                               ),
@@ -895,7 +898,7 @@ class _TaskManagerTabWidgetState extends State<TaskManagerTabWidget> {
                               tabAssignmentBadge,
                               const SizedBox(width: 6),
                               IconButton(
-                                icon: const Icon(Icons.edit_outlined, size: 16, color: Colors.grey),
+                                icon: Icon(Icons.edit_outlined, size: 16, color: scheme.mutedText),
                                 tooltip: 'Edit Task',
                                 onPressed: () => _showEditTaskDialog(task),
                               ),

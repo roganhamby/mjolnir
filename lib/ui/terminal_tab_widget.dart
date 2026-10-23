@@ -11,6 +11,7 @@ import '../models/server_config.dart';
 import '../models/task_item.dart';
 import '../services/ssh_service.dart';
 import '../theme/ansi_themes.dart';
+import '../theme/app_color_schemes.dart';
 import 'task_manager_tab_widget.dart';
 
 class TerminalTabWidget extends StatefulWidget {
@@ -607,7 +608,7 @@ Total Characters Logged: $_screenLogBytesWritten
     _requestTerminalFocus();
   }
 
-  Widget _buildMobileAccessoryBar() {
+  Widget _buildMobileAccessoryBar(AppColorScheme scheme) {
     Widget keyButton(
       String label, {
       required VoidCallback onTap,
@@ -617,7 +618,7 @@ Total Characters Logged: $_screenLogBytesWritten
       return Padding(
         padding: const EdgeInsets.symmetric(horizontal: 3),
         child: Material(
-          color: highlighted ? Colors.amberAccent : const Color(0xFF333333),
+          color: highlighted ? scheme.accentColor : scheme.elevatedSurface,
           borderRadius: BorderRadius.circular(5),
           child: InkWell(
             onTap: onTap,
@@ -630,14 +631,14 @@ Total Characters Logged: $_screenLogBytesWritten
                   ? Icon(
                       icon,
                       size: 16,
-                      color: highlighted ? Colors.black : Colors.white,
+                      color: highlighted ? Colors.black : scheme.primaryText,
                     )
                   : Text(
                       label,
                       style: TextStyle(
                         fontSize: 11,
                         fontWeight: FontWeight.bold,
-                        color: highlighted ? Colors.black : Colors.white,
+                        color: highlighted ? Colors.black : scheme.primaryText,
                       ),
                     ),
             ),
@@ -649,9 +650,9 @@ Total Characters Logged: $_screenLogBytesWritten
     return Container(
       height: 42,
       padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 4),
-      decoration: const BoxDecoration(
-        color: Color(0xFF252526),
-        border: Border(top: BorderSide(color: Color(0xFF3C3C3C))),
+      decoration: BoxDecoration(
+        color: scheme.panelBackground,
+        border: Border(top: BorderSide(color: scheme.borderColor)),
       ),
       child: SingleChildScrollView(
         scrollDirection: Axis.horizontal,
@@ -719,13 +720,14 @@ Total Characters Logged: $_screenLogBytesWritten
   @override
   Widget build(BuildContext context) {
     final isMobile = Platform.isAndroid || Platform.isIOS;
+    final scheme = AppColorScheme.of(context);
 
     return Column(
       children: [
         // Connection Info & Control Bar
         Container(
           padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-          color: const Color(0xFF252526),
+          color: scheme.panelBackground,
           child: Row(
             children: [
               Icon(
@@ -733,14 +735,14 @@ Total Characters Logged: $_screenLogBytesWritten
                 size: 16,
                 color: _errorMessage != null
                     ? Colors.redAccent
-                    : (_isLoading ? Colors.amber : Colors.greenAccent),
+                    : (_isLoading ? scheme.accentColor : Colors.greenAccent),
               ),
               const SizedBox(width: 8),
               Flexible(
                 child: Text(
                   '${widget.server.name} (${widget.server.username}@${widget.server.host})',
-                  style: const TextStyle(
-                    color: Colors.white,
+                  style: TextStyle(
+                    color: scheme.primaryText,
                     fontWeight: FontWeight.bold,
                     fontSize: 12,
                   ),
@@ -807,7 +809,7 @@ Total Characters Logged: $_screenLogBytesWritten
                       )
                     else
                       IconButton(
-                        icon: const Icon(Icons.fiber_manual_record_outlined, size: 15, color: Colors.grey),
+                        icon: Icon(Icons.fiber_manual_record_outlined, size: 15, color: scheme.mutedText),
                         tooltip: 'Start Screen Log (Save streamed terminal output to file)',
                         padding: EdgeInsets.zero,
                         constraints: const BoxConstraints(minWidth: 26, minHeight: 24),
@@ -818,20 +820,20 @@ Total Characters Logged: $_screenLogBytesWritten
                     Container(
                       height: 14,
                       width: 1,
-                      color: Colors.grey.shade700,
+                      color: scheme.borderColor,
                       margin: const EdgeInsets.symmetric(horizontal: 4),
                     ),
 
                     // Copy & Paste Toolbar Buttons
                     IconButton(
-                      icon: const Icon(Icons.copy, size: 15, color: Colors.grey),
+                      icon: Icon(Icons.copy, size: 15, color: scheme.mutedText),
                       tooltip: 'Copy Selection (${Platform.isMacOS ? "⌘C" : "Ctrl+Shift+C"})',
                       padding: EdgeInsets.zero,
                       constraints: const BoxConstraints(minWidth: 26, minHeight: 24),
                       onPressed: _copySelection,
                     ),
                     IconButton(
-                      icon: const Icon(Icons.paste, size: 15, color: Colors.grey),
+                      icon: Icon(Icons.paste, size: 15, color: scheme.mutedText),
                       tooltip: 'Paste (${Platform.isMacOS ? "⌘V" : "Ctrl+V"})',
                       padding: EdgeInsets.zero,
                       constraints: const BoxConstraints(minWidth: 26, minHeight: 24),
@@ -842,13 +844,13 @@ Total Characters Logged: $_screenLogBytesWritten
                     Container(
                       height: 14,
                       width: 1,
-                      color: Colors.grey.shade700,
+                      color: scheme.borderColor,
                       margin: const EdgeInsets.symmetric(horizontal: 4),
                     ),
 
                     // Font size adjustment buttons
                     IconButton(
-                      icon: const Icon(Icons.remove, size: 14, color: Colors.grey),
+                      icon: Icon(Icons.remove, size: 14, color: scheme.mutedText),
                       tooltip: 'Decrease Font Size',
                       padding: EdgeInsets.zero,
                       constraints: const BoxConstraints(minWidth: 24, minHeight: 24),
@@ -860,12 +862,12 @@ Total Characters Logged: $_screenLogBytesWritten
                         padding: const EdgeInsets.symmetric(horizontal: 4),
                         child: Text(
                           '${_fontSize.toInt()}pt',
-                          style: const TextStyle(color: Colors.grey, fontSize: 11),
+                          style: TextStyle(color: scheme.mutedText, fontSize: 11),
                         ),
                       ),
                     ),
                     IconButton(
-                      icon: const Icon(Icons.add, size: 14, color: Colors.grey),
+                      icon: Icon(Icons.add, size: 14, color: scheme.mutedText),
                       tooltip: 'Increase Font Size',
                       padding: EdgeInsets.zero,
                       constraints: const BoxConstraints(minWidth: 24, minHeight: 24),
@@ -876,7 +878,7 @@ Total Characters Logged: $_screenLogBytesWritten
                     Container(
                       height: 14,
                       width: 1,
-                      color: Colors.grey.shade700,
+                      color: scheme.borderColor,
                       margin: const EdgeInsets.symmetric(horizontal: 4),
                     ),
 
@@ -889,21 +891,21 @@ Total Characters Logged: $_screenLogBytesWritten
                       child: Container(
                         padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 3),
                         decoration: BoxDecoration(
-                          color: const Color(0xFF333333),
+                          color: scheme.elevatedSurface,
                           borderRadius: BorderRadius.circular(4),
-                          border: Border.all(color: Colors.grey.shade800),
+                          border: Border.all(color: scheme.borderColor),
                         ),
                         child: Row(
                           mainAxisSize: MainAxisSize.min,
                           children: [
-                            const Icon(Icons.palette_outlined, size: 12, color: Colors.amberAccent),
+                            Icon(Icons.palette_outlined, size: 12, color: scheme.accentColor),
                             const SizedBox(width: 4),
                             Text(
                               _currentThemeName,
-                              style: const TextStyle(fontSize: 11, color: Colors.white),
+                              style: TextStyle(fontSize: 11, color: scheme.primaryText),
                             ),
                             const SizedBox(width: 2),
-                            const Icon(Icons.arrow_drop_down, size: 13, color: Colors.grey),
+                            Icon(Icons.arrow_drop_down, size: 13, color: scheme.mutedText),
                           ],
                         ),
                       ),
@@ -917,7 +919,7 @@ Total Characters Logged: $_screenLogBytesWritten
                             child: Row(
                               children: [
                                 if (isSelected)
-                                  const Icon(Icons.check, size: 14, color: Colors.amberAccent)
+                                  Icon(Icons.check, size: 14, color: scheme.accentColor)
                                 else
                                   const SizedBox(width: 14),
                                 const SizedBox(width: 6),
@@ -948,7 +950,7 @@ Total Characters Logged: $_screenLogBytesWritten
                       )
                     else if (_errorMessage != null)
                       IconButton(
-                        icon: const Icon(Icons.refresh, size: 16, color: Colors.amber),
+                        icon: Icon(Icons.refresh, size: 16, color: scheme.accentColor),
                         tooltip: 'Reconnect',
                         padding: EdgeInsets.zero,
                         constraints: const BoxConstraints(minWidth: 24, minHeight: 24),
@@ -987,7 +989,7 @@ Total Characters Logged: $_screenLogBytesWritten
         ),
 
         // Mobile Accessory Key Bar (ESC, TAB, CTRL, Arrows, Keyboard Toggle)
-        if (isMobile) _buildMobileAccessoryBar(),
+        if (isMobile) _buildMobileAccessoryBar(scheme),
       ],
     );
   }

@@ -16,32 +16,56 @@ import 'ui/sftp_tab_widget.dart';
 import 'ui/task_manager_tab_widget.dart';
 import 'ui/server_edit_dialog.dart';
 import 'theme/ansi_themes.dart';
+import 'theme/app_color_schemes.dart';
 import 'package:xterm/xterm.dart';
 
 void main() {
   runApp(const MyApp());
 }
 
-class MyApp extends StatelessWidget {
+class MyApp extends StatefulWidget {
   const MyApp({super.key});
 
   @override
+  State<MyApp> createState() => _MyAppState();
+}
+
+class _MyAppState extends State<MyApp> {
+  AppColorScheme _colorScheme = AppColorSchemes.mjolnirAmber;
+
+  @override
+  void initState() {
+    super.initState();
+    AppColorSchemes.loadSavedSchemeName().then((savedName) {
+      if (mounted) {
+        setState(() {
+          _colorScheme = AppColorSchemes.byName(savedName);
+        });
+      }
+    });
+  }
+
+  void _handleSchemeChanged(String schemeName) {
+    final next = AppColorSchemes.byName(schemeName);
+    setState(() {
+      _colorScheme = next;
+    });
+    AppColorSchemes.saveSchemeName(next.name);
+  }
+
+  @override
   Widget build(BuildContext context) {
+    final themeData = _colorScheme.toThemeData();
     return MaterialApp(
       title: 'Mjölnir',
       debugShowCheckedModeBanner: false,
-      themeMode: ThemeMode.dark,
-      darkTheme: ThemeData(
-        brightness: Brightness.dark,
-        colorSchemeSeed: Colors.amber,
-        useMaterial3: true,
-        scaffoldBackgroundColor: const Color(0xFF1E1E1E),
-        appBarTheme: const AppBarTheme(
-          backgroundColor: Color(0xFF252526),
-          elevation: 0,
-        ),
+      themeMode: _colorScheme.isDark ? ThemeMode.dark : ThemeMode.light,
+      theme: themeData,
+      darkTheme: themeData,
+      home: MainScreen(
+        currentColorScheme: _colorScheme,
+        onColorSchemeChanged: _handleSchemeChanged,
       ),
-      home: const MainScreen(),
     );
   }
 }
@@ -69,7 +93,14 @@ class TabItem {
 }
 
 class MainScreen extends StatefulWidget {
-  const MainScreen({super.key});
+  final AppColorScheme currentColorScheme;
+  final ValueChanged<String>? onColorSchemeChanged;
+
+  const MainScreen({
+    super.key,
+    this.currentColorScheme = AppColorSchemes.mjolnirAmber,
+    this.onColorSchemeChanged,
+  });
 
   @override
   State<MainScreen> createState() => _MainScreenState();
@@ -1006,10 +1037,71 @@ class _MainScreenState extends State<MainScreen> {
     );
   }
 
+  Widget _buildColorSchemeMenuButton(AppColorScheme activeScheme) {
+    return PopupMenuButton<String>(
+      tooltip: 'App Color Scheme: ${activeScheme.name}',
+      icon: Icon(
+        Icons.palette_outlined,
+        size: 20,
+        color: activeScheme.accentColor,
+      ),
+      onSelected: (schemeName) {
+        widget.onColorSchemeChanged?.call(schemeName);
+      },
+      itemBuilder: (ctx) {
+        return AppColorSchemes.all.entries.map((entry) {
+          final scheme = entry.value;
+          final isSelected = scheme.name == activeScheme.name;
+          return PopupMenuItem<String>(
+            value: scheme.name,
+            height: 36,
+            child: Row(
+              children: [
+                if (isSelected)
+                  Icon(Icons.check, size: 15, color: activeScheme.accentColor)
+                else
+                  const SizedBox(width: 15),
+                const SizedBox(width: 8),
+                Container(
+                  width: 14,
+                  height: 14,
+                  decoration: BoxDecoration(
+                    color: scheme.panelBackground,
+                    shape: BoxShape.circle,
+                    border: Border.all(color: scheme.accentColor, width: 2),
+                  ),
+                ),
+                const SizedBox(width: 6),
+                Container(
+                  width: 10,
+                  height: 10,
+                  decoration: BoxDecoration(
+                    color: scheme.accentColor,
+                    shape: BoxShape.circle,
+                  ),
+                ),
+                const SizedBox(width: 10),
+                Text(
+                  scheme.name,
+                  style: TextStyle(
+                    fontSize: 12,
+                    fontWeight: isSelected ? FontWeight.bold : FontWeight.normal,
+                  ),
+                ),
+              ],
+            ),
+          );
+        }).toList();
+      },
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
+    final scheme = AppColorScheme.of(context);
+
     if (!_vaultManager.isUnlocked) {
-      return _buildUnlockScreen();
+      return _buildUnlockScreen(scheme);
     }
 
     return CallbackShortcuts(
@@ -1039,12 +1131,12 @@ class _MainScreenState extends State<MainScreen> {
                 'assets/app_icon.png',
                 width: 24,
                 height: 24,
-                errorBuilder: (context, error, stackTrace) => const Icon(Icons.bolt, color: Colors.amberAccent, size: 22),
+                errorBuilder: (context, error, stackTrace) => Icon(Icons.bolt, color: scheme.accentColor, size: 22),
               ),
               const SizedBox(width: 8),
-              const Text('Mjölnir', style: TextStyle(fontSize: 17, fontWeight: FontWeight.bold)),
+              Text('Mjölnir', style: TextStyle(fontSize: 17, fontWeight: FontWeight.bold, color: scheme.primaryText)),
               const SizedBox(width: 8),
-              const Text('• SSH & SFTP', style: TextStyle(fontSize: 12, color: Colors.grey)),
+              Text('• SSH & SFTP', style: TextStyle(fontSize: 12, color: scheme.mutedText)),
             ],
           ),
           actions: [
@@ -1054,7 +1146,7 @@ class _MainScreenState extends State<MainScreen> {
                 size: 18,
                 color: _vaultManager.tasks.any((t) => t.isOverdue)
                     ? Colors.redAccent
-                    : Colors.amberAccent,
+                    : scheme.accentColor,
               ),
               label: Text(
                 _vaultManager.tasks.isEmpty
@@ -1064,7 +1156,7 @@ class _MainScreenState extends State<MainScreen> {
                   fontSize: 12,
                   color: _vaultManager.tasks.any((t) => t.isOverdue)
                       ? Colors.redAccent
-                      : Colors.white,
+                      : scheme.primaryText,
                   fontWeight: _vaultManager.tasks.any((t) => t.isOverdue)
                       ? FontWeight.bold
                       : FontWeight.normal,
@@ -1072,6 +1164,7 @@ class _MainScreenState extends State<MainScreen> {
               ),
               onPressed: _openTaskManagerTab,
             ),
+            _buildColorSchemeMenuButton(scheme),
             PopupMenuButton<String>(
               icon: const Icon(Icons.file_upload_outlined, size: 20),
               tooltip: 'Import JSON Connections',
@@ -1089,13 +1182,13 @@ class _MainScreenState extends State<MainScreen> {
                     title: Text('Import from Local JSON File'),
                   ),
                 ),
-                const PopupMenuItem(
+                PopupMenuItem(
                   value: 'dropbox',
                   child: ListTile(
                     dense: true,
                     contentPadding: EdgeInsets.zero,
-                    leading: Icon(Icons.cloud_download_outlined, size: 18, color: Colors.amberAccent),
-                    title: Text('Import Newest from Dropbox (/App/Mjolnir)'),
+                    leading: Icon(Icons.cloud_download_outlined, size: 18, color: scheme.accentColor),
+                    title: const Text('Import Newest from Dropbox (/App/Mjolnir)'),
                   ),
                 ),
               ],
@@ -1117,13 +1210,13 @@ class _MainScreenState extends State<MainScreen> {
                     title: Text('Export to Local JSON File'),
                   ),
                 ),
-                const PopupMenuItem(
+                PopupMenuItem(
                   value: 'dropbox',
                   child: ListTile(
                     dense: true,
                     contentPadding: EdgeInsets.zero,
-                    leading: Icon(Icons.cloud_upload_outlined, size: 18, color: Colors.amberAccent),
-                    title: Text('Export to Dropbox (/App/Mjolnir)'),
+                    leading: Icon(Icons.cloud_upload_outlined, size: 18, color: scheme.accentColor),
+                    title: const Text('Export to Dropbox (/App/Mjolnir)'),
                   ),
                 ),
               ],
@@ -1166,21 +1259,21 @@ class _MainScreenState extends State<MainScreen> {
               curve: Curves.easeInOut,
               width: _isSidebarCollapsed ? 0 : 280,
               clipBehavior: Clip.hardEdge,
-              decoration: const BoxDecoration(
-                color: Color(0xFF252526),
+              decoration: BoxDecoration(
+                color: scheme.panelBackground,
               ),
               child: OverflowBox(
                 minWidth: 280,
                 maxWidth: 280,
                 alignment: Alignment.topLeft,
-                child: _buildSidebar(),
+                child: _buildSidebar(scheme),
               ),
             ),
             if (!_isSidebarCollapsed)
-              const VerticalDivider(width: 1, thickness: 1, color: Color(0xFF333333)),
+              VerticalDivider(width: 1, thickness: 1, color: scheme.borderColor),
             // Workspace: Tabs and Session View
             Expanded(
-              child: _buildWorkspace(),
+              child: _buildWorkspace(scheme),
             ),
           ],
         ),
@@ -1188,16 +1281,23 @@ class _MainScreenState extends State<MainScreen> {
     );
   }
 
-  Widget _buildUnlockScreen() {
+  Widget _buildUnlockScreen(AppColorScheme scheme) {
     return Scaffold(
+      appBar: AppBar(
+        backgroundColor: Colors.transparent,
+        actions: [
+          _buildColorSchemeMenuButton(scheme),
+          const SizedBox(width: 12),
+        ],
+      ),
       body: Center(
         child: Container(
           width: 380,
           padding: const EdgeInsets.all(28),
           decoration: BoxDecoration(
-            color: const Color(0xFF252526),
+            color: scheme.panelBackground,
             borderRadius: BorderRadius.circular(12),
-            border: Border.all(color: const Color(0xFF3C3C3C)),
+            border: Border.all(color: scheme.borderColor),
           ),
           child: Column(
             mainAxisSize: MainAxisSize.min,
@@ -1206,17 +1306,17 @@ class _MainScreenState extends State<MainScreen> {
                 'assets/app_icon.png',
                 width: 64,
                 height: 64,
-                errorBuilder: (context, error, stackTrace) => const Icon(Icons.bolt, size: 56, color: Colors.amberAccent),
+                errorBuilder: (context, error, stackTrace) => Icon(Icons.bolt, size: 56, color: scheme.accentColor),
               ),
               const SizedBox(height: 12),
-              const Text(
+              Text(
                 'Mjölnir',
-                style: TextStyle(fontSize: 26, fontWeight: FontWeight.bold),
+                style: TextStyle(fontSize: 26, fontWeight: FontWeight.bold, color: scheme.primaryText),
               ),
               const SizedBox(height: 4),
-              const Text(
+              Text(
                 'Secure SSH & SFTP Sync Client',
-                style: TextStyle(fontSize: 13, color: Colors.grey),
+                style: TextStyle(fontSize: 13, color: scheme.mutedText),
               ),
               const SizedBox(height: 24),
               TextField(
@@ -1252,7 +1352,7 @@ class _MainScreenState extends State<MainScreen> {
                   size: 16,
                   color: _vaultManager.dropboxService.config.isConfigured
                       ? Colors.greenAccent
-                      : Colors.amberAccent,
+                      : scheme.accentColor,
                 ),
                 label: Text(
                   _vaultManager.dropboxService.config.isConfigured
@@ -1278,7 +1378,7 @@ class _MainScreenState extends State<MainScreen> {
     );
   }
 
-  Widget _buildSidebar() {
+  Widget _buildSidebar(AppColorScheme scheme) {
     final servers = _vaultManager.servers;
 
     return Column(
@@ -1287,26 +1387,26 @@ class _MainScreenState extends State<MainScreen> {
         Container(
           height: 38,
           padding: const EdgeInsets.symmetric(horizontal: 12),
-          decoration: const BoxDecoration(
-            color: Color(0xFF1E1E1E),
-            border: Border(bottom: BorderSide(color: Color(0xFF333333))),
+          decoration: BoxDecoration(
+            color: scheme.scaffoldBackground,
+            border: Border(bottom: BorderSide(color: scheme.borderColor)),
           ),
           child: Row(
             children: [
-              const Icon(Icons.dns, size: 14, color: Colors.amberAccent),
+              Icon(Icons.dns, size: 14, color: scheme.accentColor),
               const SizedBox(width: 8),
               Text(
                 'SERVERS (${servers.length})',
-                style: const TextStyle(
+                style: TextStyle(
                   fontSize: 11,
                   fontWeight: FontWeight.bold,
                   letterSpacing: 0.8,
-                  color: Colors.grey,
+                  color: scheme.mutedText,
                 ),
               ),
               const Spacer(),
               IconButton(
-                icon: const Icon(Icons.add, size: 16, color: Colors.grey),
+                icon: Icon(Icons.add, size: 16, color: scheme.mutedText),
                 tooltip: 'Add Server',
                 padding: EdgeInsets.zero,
                 constraints: const BoxConstraints(minWidth: 24, minHeight: 24),
@@ -1314,7 +1414,7 @@ class _MainScreenState extends State<MainScreen> {
               ),
               const SizedBox(width: 4),
               IconButton(
-                icon: const Icon(Icons.chevron_left, size: 18, color: Colors.grey),
+                icon: Icon(Icons.chevron_left, size: 18, color: scheme.mutedText),
                 tooltip: 'Collapse Sidebar (${Platform.isMacOS ? "⌘B" : "Ctrl+B"})',
                 padding: EdgeInsets.zero,
                 constraints: const BoxConstraints(minWidth: 24, minHeight: 24),
@@ -1332,9 +1432,9 @@ class _MainScreenState extends State<MainScreen> {
                     child: Column(
                       mainAxisSize: MainAxisSize.min,
                       children: [
-                        const Icon(Icons.dns_outlined, size: 40, color: Colors.grey),
+                        Icon(Icons.dns_outlined, size: 40, color: scheme.mutedText),
                         const SizedBox(height: 8),
-                        const Text('No servers yet', style: TextStyle(color: Colors.grey)),
+                        Text('No servers yet', style: TextStyle(color: scheme.mutedText)),
                         const SizedBox(height: 12),
                         ElevatedButton.icon(
                           icon: const Icon(Icons.add, size: 16),
@@ -1356,7 +1456,7 @@ class _MainScreenState extends State<MainScreen> {
                       leading: Icon(
                         isSftp ? Icons.folder_shared : Icons.computer,
                         size: 20,
-                        color: Colors.amberAccent,
+                        color: scheme.accentColor,
                       ),
                       title: Row(
                         children: [
@@ -1366,7 +1466,9 @@ class _MainScreenState extends State<MainScreen> {
                           Container(
                             padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
                             decoration: BoxDecoration(
-                              color: isSftp ? Colors.blueGrey.withAlpha(80) : Colors.amber.withAlpha(60),
+                              color: isSftp
+                                  ? scheme.secondaryAccent.withValues(alpha: 0.22)
+                                  : scheme.accentColor.withValues(alpha: 0.22),
                               borderRadius: BorderRadius.circular(4),
                             ),
                             child: Text(
@@ -1411,17 +1513,17 @@ class _MainScreenState extends State<MainScreen> {
     );
   }
 
-  Widget _buildWorkspace() {
+  Widget _buildWorkspace(AppColorScheme scheme) {
     if (_openTabs.isEmpty) {
       return Center(
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            const Icon(Icons.terminal_outlined, size: 56, color: Colors.grey),
+            Icon(Icons.terminal_outlined, size: 56, color: scheme.mutedText),
             const SizedBox(height: 12),
-            const Text(
+            Text(
               'Select a server from the sidebar to launch an SSH terminal or SFTP browser.',
-              style: TextStyle(color: Colors.grey),
+              style: TextStyle(color: scheme.mutedText),
             ),
             const SizedBox(height: 16),
             Wrap(
@@ -1434,7 +1536,7 @@ class _MainScreenState extends State<MainScreen> {
                     onPressed: () => setState(() => _isSidebarCollapsed = false),
                   ),
                 OutlinedButton.icon(
-                  icon: const Icon(Icons.task_alt, size: 16, color: Colors.amberAccent),
+                  icon: Icon(Icons.task_alt, size: 16, color: scheme.accentColor),
                   label: const Text('Open Task Manager'),
                   onPressed: _openTaskManagerTab,
                 ),
@@ -1455,12 +1557,12 @@ class _MainScreenState extends State<MainScreen> {
         // Tab Header Bar
         Container(
           height: 38,
-          color: const Color(0xFF1E1E1E),
+          color: scheme.scaffoldBackground,
           child: Row(
             children: [
               if (_isSidebarCollapsed)
                 IconButton(
-                  icon: const Icon(Icons.chevron_right, size: 18, color: Colors.grey),
+                  icon: Icon(Icons.chevron_right, size: 18, color: scheme.mutedText),
                   tooltip: 'Expand Sidebar (${Platform.isMacOS ? "⌘B" : "Ctrl+B"})',
                   padding: EdgeInsets.zero,
                   constraints: const BoxConstraints(minWidth: 32, minHeight: 38),
@@ -1473,7 +1575,7 @@ class _MainScreenState extends State<MainScreen> {
                   itemBuilder: (context, index) {
                     final tab = _openTabs[index];
                     final isActive = index == _activeTabIndex;
-                    final tabHighlightColor = tab.color ?? (isActive ? Colors.amberAccent : Colors.transparent);
+                    final tabHighlightColor = tab.color ?? (isActive ? scheme.accentColor : Colors.transparent);
                     final assignedTask = (tab.type == 'ssh' || tab.type == 'sftp')
                         ? _getAssignedTaskForTab(tab.id)
                         : null;
@@ -1488,13 +1590,13 @@ class _MainScreenState extends State<MainScreen> {
                       child: Container(
                         padding: const EdgeInsets.symmetric(horizontal: 12),
                         decoration: BoxDecoration(
-                          color: isActive ? const Color(0xFF252526) : const Color(0xFF1E1E1E),
+                          color: isActive ? scheme.panelBackground : scheme.scaffoldBackground,
                           border: Border(
                             top: BorderSide(
                               color: tabHighlightColor,
                               width: tab.color != null ? 3 : 2,
                             ),
-                            right: const BorderSide(color: Color(0xFF333333)),
+                            right: BorderSide(color: scheme.borderColor),
                           ),
                         ),
                         child: Row(
@@ -1509,13 +1611,13 @@ class _MainScreenState extends State<MainScreen> {
                                   shape: BoxShape.circle,
                                 ),
                               ),
-                            Icon(tab.icon, size: 14, color: isActive ? Colors.white : Colors.grey),
+                            Icon(tab.icon, size: 14, color: isActive ? scheme.primaryText : scheme.mutedText),
                             const SizedBox(width: 8),
                             Text(
                               tab.title,
                               style: TextStyle(
                                 fontSize: 12,
-                                color: isActive ? Colors.white : Colors.grey,
+                                color: isActive ? scheme.primaryText : scheme.mutedText,
                                 fontWeight: isActive ? FontWeight.bold : FontWeight.normal,
                               ),
                             ),
@@ -1553,7 +1655,7 @@ class _MainScreenState extends State<MainScreen> {
                                         style: TextStyle(
                                           fontSize: 11,
                                           fontWeight: FontWeight.w600,
-                                          color: isTaskOverdue ? Colors.redAccent : Colors.white,
+                                          color: isTaskOverdue ? Colors.redAccent : scheme.primaryText,
                                         ),
                                         overflow: TextOverflow.ellipsis,
                                       ),
@@ -1567,7 +1669,7 @@ class _MainScreenState extends State<MainScreen> {
                                           fontWeight: isTaskOverdue ? FontWeight.bold : FontWeight.normal,
                                           color: isTaskOverdue
                                               ? Colors.redAccent
-                                              : Colors.grey.shade300,
+                                              : scheme.mutedText,
                                         ),
                                       ),
                                     ],
@@ -1578,12 +1680,12 @@ class _MainScreenState extends State<MainScreen> {
                             const SizedBox(width: 6),
                             InkWell(
                               onTap: () => _renameAndRecolorTab(tab),
-                              child: const Icon(Icons.edit, size: 12, color: Colors.grey),
+                              child: Icon(Icons.edit, size: 12, color: scheme.mutedText),
                             ),
                             const SizedBox(width: 6),
                             InkWell(
                               onTap: () => _closeTab(tab.id),
-                              child: const Icon(Icons.close, size: 14, color: Colors.grey),
+                              child: Icon(Icons.close, size: 14, color: scheme.mutedText),
                             ),
                           ],
                         ),

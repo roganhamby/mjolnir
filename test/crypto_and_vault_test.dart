@@ -6,6 +6,7 @@ import 'package:mjolnir/services/crypto_vault_service.dart';
 import 'package:mjolnir/services/dropbox_sync_service.dart';
 import 'package:mjolnir/services/sync_storage_provider.dart';
 import 'package:mjolnir/services/vault_manager.dart';
+import 'package:mjolnir/theme/app_color_schemes.dart';
 
 class _InMemoryStorageProvider implements SyncStorageProvider {
   SyncVaultFile? stored;
@@ -261,6 +262,16 @@ void main() {
       expect(manager.servers.length, equals(1));
       expect(manager.servers.first.name, equals('New Dropbox Server'));
       expect(manager.loadedSource, contains('Dropbox (/App/Mjolnir/servers.json)'));
+    });
+
+    test('AppColorSchemes provides valid dark and light color schemes and ThemeData', () {
+      expect(AppColorSchemes.all.length, greaterThanOrEqualTo(10));
+      for (final scheme in AppColorSchemes.all.values) {
+        final theme = scheme.toThemeData();
+        expect(theme.extension<AppColorScheme>()?.name, equals(scheme.name));
+        expect(AppColorSchemes.byName(scheme.name).name, equals(scheme.name));
+      }
+      expect(AppColorSchemes.byName('non_existent_id').name, equals(AppColorSchemes.mjolnirAmber.name));
     });
   });
 }
