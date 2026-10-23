@@ -1,9 +1,12 @@
+import 'dart:typed_data';
+import 'package:dartssh2/dartssh2.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:mjolnir/models/server_config.dart';
 import 'package:mjolnir/models/task_item.dart';
 import 'package:mjolnir/models/sync_vault_file.dart';
 import 'package:mjolnir/services/crypto_vault_service.dart';
 import 'package:mjolnir/services/dropbox_sync_service.dart';
+import 'package:mjolnir/services/ssh_service.dart';
 import 'package:mjolnir/services/sync_storage_provider.dart';
 import 'package:mjolnir/services/vault_manager.dart';
 import 'package:mjolnir/theme/app_color_schemes.dart';
@@ -272,6 +275,31 @@ void main() {
         expect(AppColorSchemes.byName(scheme.name).name, equals(scheme.name));
       }
       expect(AppColorSchemes.byName('non_existent_id').name, equals(AppColorSchemes.mjolnirAmber.name));
+    });
+
+    test('SshService includes +ssh-rsa hostkey and legacy Kex/Cipher fallbacks', () async {
+      final hostkeys = SshService.compatibleAlgorithms.hostkey.map((h) => h.name).toList();
+      expect(hostkeys, contains('ssh-rsa'));
+      expect(hostkeys.first, equals('ssh-ed25519'));
+      expect(hostkeys.last, equals('ssh-rsa'));
+
+      final kexNames = SshService.compatibleAlgorithms.kex.map((k) => k.name).toList();
+      expect(kexNames, contains('diffie-hellman-group14-sha1'));
+      expect(kexNames, contains('diffie-hellman-group1-sha1'));
+
+      // Verify legacy ssh-rsa PKCS#1 v1.5 SHA-1 signature generation
+      // Using a known 512-bit RSA test key (p=2^255+95, q=...) or small valid modulus >= 384 bits
+      final p = BigInt.parse('115792089237316195423570985008687907853269984665640564039457584007913129640233');
+      final q = BigInt.parse('115792089237316195423570985008687907853269984665640564039457584007913129640381');
+      final n = p * q;
+      final e = BigInt.from(65537);
+      final phi = (p - BigInt.one) * (q - BigInt.one);
+      final d = e.modInverse(phi);
+
+      final msg = Uint8List.fromList('ssh-handshake-challenge'.codeUnits);
+      final sigBytes = await SshService.rsaPkcs1v15Sha1Sign(n: n, d: d, message: msg);
+      final encodedSig = SshService.encodeSshSignature('ssh-rsa', sigBytes);
+      expect(SSHSignature.getType(encodedSig.encode()), equals('ssh-rsa'));
     });
   });
 }
