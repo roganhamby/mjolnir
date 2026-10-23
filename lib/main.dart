@@ -861,7 +861,9 @@ class _MainScreenState extends State<MainScreen> {
         Expanded(
           child: IndexedStack(
             index: _activeTabIndex >= 0 ? _activeTabIndex : 0,
-            children: _openTabs.map((t) {
+            children: _openTabs.asMap().entries.map((entry) {
+              final tabIndex = entry.key;
+              final t = entry.value;
               if (t.type == 'ssh') {
                 return TerminalTabWidget(
                   key: ValueKey(t.id),
@@ -870,6 +872,7 @@ class _MainScreenState extends State<MainScreen> {
                   theme: AnsiThemes.all[t.server.terminalTheme] ?? AnsiThemes.all[t.themeName] ?? TerminalThemes.defaultTheme,
                   initialThemeName: t.server.terminalTheme.isNotEmpty ? t.server.terminalTheme : t.themeName,
                   fontSize: t.fontSize,
+                  isActive: tabIndex == _activeTabIndex,
                   onFontSizeChanged: (newSize) async {
                     t.fontSize = newSize;
                     t.server.terminalFontSize = newSize;

@@ -16,6 +16,7 @@ class TerminalTabWidget extends StatefulWidget {
   final TerminalTheme theme;
   final String? initialThemeName;
   final double fontSize;
+  final bool isActive;
   final VoidCallback? onClose;
   final Function(double newFontSize)? onFontSizeChanged;
   final Function(String newThemeName)? onThemeChanged;
@@ -27,6 +28,7 @@ class TerminalTabWidget extends StatefulWidget {
     this.theme = TerminalThemes.defaultTheme,
     this.initialThemeName,
     this.fontSize = 13.0,
+    this.isActive = true,
     this.onClose,
     this.onFontSizeChanged,
     this.onThemeChanged,
@@ -39,6 +41,7 @@ class TerminalTabWidget extends StatefulWidget {
 class _TerminalTabWidgetState extends State<TerminalTabWidget> {
   late final Terminal terminal;
   late final TerminalController _terminalController;
+  late final FocusNode _terminalFocusNode;
   SshSession? _sshSession;
   bool _isLoading = true;
   String? _errorMessage;
@@ -54,22 +57,48 @@ class _TerminalTabWidgetState extends State<TerminalTabWidget> {
   int _screenLogBytesWritten = 0;
   final RegExp _ansiRegex = RegExp(r'\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])');
 
+  static TerminalTargetPlatform _getTerminalPlatform() {
+    if (Platform.isWindows) return TerminalTargetPlatform.windows;
+    if (Platform.isMacOS) return TerminalTargetPlatform.macos;
+    if (Platform.isLinux) return TerminalTargetPlatform.linux;
+    if (Platform.isAndroid) return TerminalTargetPlatform.android;
+    if (Platform.isIOS) return TerminalTargetPlatform.ios;
+    return TerminalTargetPlatform.unknown;
+  }
+
+  void _requestTerminalFocus() {
+    if (!mounted || !widget.isActive) return;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted && widget.isActive && !_terminalFocusNode.hasFocus) {
+        _terminalFocusNode.requestFocus();
+      }
+    });
+  }
+
   @override
   void initState() {
     super.initState();
     _fontSize = widget.fontSize;
-    terminal = Terminal(maxLines: 10000);
+    terminal = Terminal(
+      maxLines: 10000,
+      platform: _getTerminalPlatform(),
+    );
     _terminalController = TerminalController();
+    _terminalFocusNode = FocusNode();
     _currentThemeName = widget.server.terminalTheme.isNotEmpty
         ? widget.server.terminalTheme
         : (widget.initialThemeName ?? 'Default Dark');
     _currentTheme = AnsiThemes.all[_currentThemeName] ?? widget.theme;
+    _requestTerminalFocus();
     _connect();
   }
 
   @override
   void didUpdateWidget(TerminalTabWidget oldWidget) {
     super.didUpdateWidget(oldWidget);
+    if (!oldWidget.isActive && widget.isActive) {
+      _requestTerminalFocus();
+    }
     if (oldWidget.fontSize != widget.fontSize) {
       _fontSize = widget.fontSize;
     }
@@ -87,6 +116,7 @@ class _TerminalTabWidgetState extends State<TerminalTabWidget> {
     });
     widget.server.terminalTheme = newThemeName;
     widget.onThemeChanged?.call(newThemeName);
+    _requestTerminalFocus();
   }
 
   void _increaseFontSize() {
@@ -96,6 +126,7 @@ class _TerminalTabWidgetState extends State<TerminalTabWidget> {
       });
       widget.onFontSizeChanged?.call(_fontSize);
     }
+    _requestTerminalFocus();
   }
 
   void _decreaseFontSize() {
@@ -105,6 +136,7 @@ class _TerminalTabWidgetState extends State<TerminalTabWidget> {
       });
       widget.onFontSizeChanged?.call(_fontSize);
     }
+    _requestTerminalFocus();
   }
 
   void _resetFontSize() {
@@ -112,6 +144,7 @@ class _TerminalTabWidgetState extends State<TerminalTabWidget> {
       _fontSize = 13.0;
     });
     widget.onFontSizeChanged?.call(_fontSize);
+    _requestTerminalFocus();
   }
 
   // --- Copy & Paste Support ---
@@ -127,6 +160,7 @@ class _TerminalTabWidgetState extends State<TerminalTabWidget> {
           ),
         );
       }
+      _requestTerminalFocus();
       return;
     }
 
@@ -142,6 +176,7 @@ class _TerminalTabWidgetState extends State<TerminalTabWidget> {
         );
       }
     }
+    _requestTerminalFocus();
   }
 
   Future<void> _pasteToTerminal() async {
@@ -151,6 +186,7 @@ class _TerminalTabWidgetState extends State<TerminalTabWidget> {
       terminal.paste(text);
       _terminalController.clearSelection();
     }
+    _requestTerminalFocus();
   }
 
   void _selectAll() {
@@ -158,11 +194,13 @@ class _TerminalTabWidgetState extends State<TerminalTabWidget> {
       terminal.buffer.createAnchor(0, 0),
       terminal.buffer.createAnchor(terminal.viewWidth, terminal.buffer.height - 1),
     );
+    _requestTerminalFocus();
   }
 
   void _clearScreen() {
     terminal.eraseDisplay();
     _terminalController.clearSelection();
+    _requestTerminalFocus();
   }
 
   Future<void> _showContextMenu(Offset position) async {
@@ -255,6 +293,8 @@ class _TerminalTabWidgetState extends State<TerminalTabWidget> {
       _selectAll();
     } else if (selected == 'clear') {
       _clearScreen();
+    } else {
+      _requestTerminalFocus();
     }
   }
 
@@ -269,6 +309,7 @@ class _TerminalTabWidgetState extends State<TerminalTabWidget> {
           (isCtrl && isShift && event.logicalKey == LogicalKeyboardKey.keyC) ||
           (isCtrl && event.logicalKey == LogicalKeyboardKey.keyC && _terminalController.selection != null)) {
         _copySelection();
+        _terminalController.clearSelection();
         return KeyEventResult.handled;
       }
 
@@ -476,6 +517,7 @@ Total Characters Logged: $_screenLogBytesWritten
       setState(() {
         _isLoading = false;
       });
+      _requestTerminalFocus();
     } catch (e) {
       setState(() {
         _isLoading = false;
@@ -501,6 +543,7 @@ Total Characters Logged: $_screenLogBytesWritten
     _sshSession?.close();
     _stopScreenLogging();
     _terminalController.dispose();
+    _terminalFocusNode.dispose();
     super.dispose();
   }
 
@@ -722,13 +765,20 @@ Total Characters Logged: $_screenLogBytesWritten
           child: TerminalView(
             terminal,
             controller: _terminalController,
+            focusNode: _terminalFocusNode,
             autofocus: true,
+            hardwareKeyboardOnly: Platform.isWindows || Platform.isLinux || Platform.isMacOS,
             theme: _currentTheme,
             textStyle: TerminalStyle(
               fontSize: _fontSize,
             ),
             backgroundOpacity: 1.0,
             onKeyEvent: _handleTerminalKeyEvent,
+            onTapUp: (details, offset) {
+              if (!_terminalFocusNode.hasFocus) {
+                _terminalFocusNode.requestFocus();
+              }
+            },
             onSecondaryTapUp: (details, offset) {
               _showContextMenu(details.globalPosition);
             },
