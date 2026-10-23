@@ -7,6 +7,9 @@ on:
     branches: [ main, master ]
   workflow_dispatch: # Allows manual trigger from GitHub Actions tab
 
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
 jobs:
   build-windows:
     name: Build Windows (x64)
@@ -14,7 +17,7 @@ jobs:
 
     steps:
       - name: Check out repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Set up Flutter
         uses: subosito/flutter-action@v2
@@ -43,7 +46,7 @@ jobs:
           Write-Host "Created $zipFile successfully."
 
       - name: Upload Windows Artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: Mjolnir-Windows-x64
           path: Mjolnir-Windows-x64.zip
@@ -55,7 +58,7 @@ jobs:
 
     steps:
       - name: Check out repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Set up Flutter
         uses: subosito/flutter-action@v2
@@ -81,7 +84,7 @@ jobs:
           zip -r -y ../../../../../Mjolnir-macOS.zip Mjolnir.app
 
       - name: Upload macOS Artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: Mjolnir-macOS
           path: Mjolnir-macOS.zip
