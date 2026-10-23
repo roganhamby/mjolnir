@@ -6,7 +6,7 @@ class AnsiThemes {
 
   static const TerminalTheme dracula = TerminalTheme(
     cursor: Color(0xFFF8F8F2),
-    selection: Color(0x4444475A),
+    selection: Color(0xAA6272A4),
     foreground: Color(0xFFF8F8F2),
     background: Color(0xFF282A36),
     black: Color(0xFF21222C),
@@ -32,7 +32,7 @@ class AnsiThemes {
 
   static const TerminalTheme solarizedDark = TerminalTheme(
     cursor: Color(0xFF93A1A1),
-    selection: Color(0x44073642),
+    selection: Color(0x99268BD2),
     foreground: Color(0xFF839496),
     background: Color(0xFF002B36),
     black: Color(0xFF073642),
@@ -58,7 +58,7 @@ class AnsiThemes {
 
   static const TerminalTheme solarizedLight = TerminalTheme(
     cursor: Color(0xFF586E75),
-    selection: Color(0x44EEE8D5),
+    selection: Color(0x8893A1A1),
     foreground: Color(0xFF657B83),
     background: Color(0xFFFDF6E3),
     black: Color(0xFF073642),
@@ -84,7 +84,7 @@ class AnsiThemes {
 
   static const TerminalTheme nord = TerminalTheme(
     cursor: Color(0xFFD8DEE9),
-    selection: Color(0x444C566A),
+    selection: Color(0x995E81AC),
     foreground: Color(0xFFD8DEE9),
     background: Color(0xFF2E3440),
     black: Color(0xFF3B4252),
@@ -110,7 +110,7 @@ class AnsiThemes {
 
   static const TerminalTheme monokai = TerminalTheme(
     cursor: Color(0xFFF8F8F0),
-    selection: Color(0x4449483E),
+    selection: Color(0xAA75715E),
     foreground: Color(0xFFF8F8F2),
     background: Color(0xFF272822),
     black: Color(0xFF272822),
@@ -136,7 +136,7 @@ class AnsiThemes {
 
   static const TerminalTheme oneDark = TerminalTheme(
     cursor: Color(0xFF528BFF),
-    selection: Color(0x443E4451),
+    selection: Color(0x993E4451),
     foreground: Color(0xFFABB2BF),
     background: Color(0xFF282C34),
     black: Color(0xFF282C34),
@@ -162,7 +162,7 @@ class AnsiThemes {
 
   static const TerminalTheme tokyoNight = TerminalTheme(
     cursor: Color(0xFFC0CAF5),
-    selection: Color(0x44364A82),
+    selection: Color(0xAA364A82),
     foreground: Color(0xFFA9B1D6),
     background: Color(0xFF1A1B26),
     black: Color(0xFF15161E),
@@ -188,7 +188,7 @@ class AnsiThemes {
 
   static const TerminalTheme gruvboxDark = TerminalTheme(
     cursor: Color(0xFFEBDBB2),
-    selection: Color(0x44504945),
+    selection: Color(0xAA665C54),
     foreground: Color(0xFFEBDBB2),
     background: Color(0xFF282828),
     black: Color(0xFF282828),
@@ -214,7 +214,7 @@ class AnsiThemes {
 
   static const TerminalTheme synthwave84 = TerminalTheme(
     cursor: Color(0xFFFF7EDB),
-    selection: Color(0x44463465),
+    selection: Color(0xAA684D99),
     foreground: Color(0xFFF92AAD),
     background: Color(0xFF262335),
     black: Color(0xFF1E1A2B),
@@ -240,7 +240,7 @@ class AnsiThemes {
 
   static const TerminalTheme githubDark = TerminalTheme(
     cursor: Color(0xFF58A6FF),
-    selection: Color(0x44264366),
+    selection: Color(0x99388BFD),
     foreground: Color(0xFFC9D1D9),
     background: Color(0xFF0D1117),
     black: Color(0xFF484F58),

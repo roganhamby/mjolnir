@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'package:file_picker/file_picker.dart';
+import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:intl/intl.dart';
@@ -49,10 +50,81 @@ class TerminalTabWidget extends StatefulWidget {
   State<TerminalTabWidget> createState() => _TerminalTabWidgetState();
 }
 
+class _TerminalSelectionController extends TerminalController {
+  _TerminalSelectionController({
+    required this.isDesktop,
+    this.onSelectionUpdated,
+  }) : super(pointerInputs: const PointerInputs.none());
+
+  final bool isDesktop;
+  final VoidCallback? onSelectionUpdated;
+  bool _allowInternalUpdate = false;
+  BufferRange? _fallbackSelection;
+
+  @override
+  BufferRange? get selection => super.selection ?? _fallbackSelection;
+
+  void setCustomSelection(
+    CellAnchor base,
+    CellAnchor extent, {
+    CellOffset? baseOffset,
+    CellOffset? extentOffset,
+    SelectionMode? mode,
+  }) {
+    if (baseOffset != null && extentOffset != null) {
+      final effectiveMode = mode ?? selectionMode;
+      _fallbackSelection = effectiveMode == SelectionMode.block
+          ? BufferRangeBlock(baseOffset, extentOffset)
+          : BufferRangeLine(baseOffset, extentOffset);
+    }
+    _allowInternalUpdate = true;
+    try {
+      super.setSelection(base, extent, mode: mode);
+    } finally {
+      _allowInternalUpdate = false;
+    }
+    onSelectionUpdated?.call();
+  }
+
+  void forceClearSelection() {
+    _fallbackSelection = null;
+    _allowInternalUpdate = true;
+    try {
+      super.clearSelection();
+    } finally {
+      _allowInternalUpdate = false;
+    }
+    onSelectionUpdated?.call();
+  }
+
+  @override
+  void setSelection(CellAnchor base, CellAnchor extent, {SelectionMode? mode}) {
+    if (isDesktop && !_allowInternalUpdate) {
+      base.dispose();
+      extent.dispose();
+      return;
+    }
+    super.setSelection(base, extent, mode: mode);
+    onSelectionUpdated?.call();
+  }
+
+  @override
+  void clearSelection() {
+    if (isDesktop && !_allowInternalUpdate) {
+      return;
+    }
+    _fallbackSelection = null;
+    super.clearSelection();
+    onSelectionUpdated?.call();
+  }
+}
+
 class _TerminalTabWidgetState extends State<TerminalTabWidget>
     with WidgetsBindingObserver {
+  final GlobalKey<TerminalViewState> _terminalViewKey =
+      GlobalKey<TerminalViewState>();
   late final Terminal terminal;
-  late final TerminalController _terminalController;
+  late final _TerminalSelectionController _terminalController;
   late final ScrollController _scrollController;
   late final FocusNode _terminalFocusNode;
   SshSession? _sshSession;
@@ -65,6 +137,11 @@ class _TerminalTabWidgetState extends State<TerminalTabWidget>
   int _lastCellWidth = 0;
   int _lastCellHeight = 0;
   bool _consumedCopyOnCtrlCDown = false;
+  bool _isPrimaryPointerDown = false;
+  Offset? _selectionDragOriginGlobal;
+  DateTime? _lastPointerDownTime;
+  Offset? _lastPointerDownPosition;
+  int _pointerClickCount = 0;
 
   // Screen logging state
   bool _isScreenLogging = false;
@@ -196,8 +273,9 @@ class _TerminalTabWidgetState extends State<TerminalTabWidget>
     // Disable sending mouse tap events to the remote application so that
     // mouse drag selection and right-click context menu (Copy / Paste) work
     // reliably even when vim enables mouse mode (set mouse=a).
-    _terminalController = TerminalController(
-      pointerInputs: const PointerInputs.none(),
+    _terminalController = _TerminalSelectionController(
+      isDesktop: Platform.isMacOS || Platform.isWindows || Platform.isLinux,
+      onSelectionUpdated: _markTerminalNeedsPaint,
     );
     _scrollController = ScrollController();
     _terminalFocusNode = FocusNode();
@@ -296,6 +374,277 @@ class _TerminalTabWidgetState extends State<TerminalTabWidget>
   }
 
   // --- Copy & Paste Support ---
+
+  void _repairDetachedBufferLines([Buffer? targetBuffer]) {
+    final buf = targetBuffer ?? terminal.buffer;
+    final len = buf.lines.length;
+    for (var i = 0; i < len; i++) {
+      final line = buf.lines[i];
+      if (!line.attached) {
+        buf.lines[i] = line;
+      }
+    }
+  }
+
+  void _writeToTerminal(String rawText) {
+    if (rawText.isEmpty) return;
+    var processed = rawText;
+
+    // Extract any OSC 52 clipboard sequence wrapped inside a GNU screen / tmux
+    // DCS passthrough (\x1bP...\x1b\\) so yanking inside screen/vim copies to
+    // the local system clipboard.
+    if (processed.contains('\x1bP')) {
+      final dcsOsc52 = RegExp(
+        r'\x1bP(?:tmux;)?(?:\x1b)+]52;[^;\x07\x1b]*;([A-Za-z0-9+/=\s]+?)(?:\x07|\x1b\\)+',
+      );
+      for (final match in dcsOsc52.allMatches(processed)) {
+        final payload = match.group(1);
+        if (payload != null && payload.isNotEmpty && payload != '?') {
+          _handlePrivateOSC('52', ['c', payload]);
+        }
+      }
+    }
+
+    // Strip DCS (\x1bP...\x1b\\), APC (\x1b_...\x1b\\), PM (\x1b^...\x1b\\),
+    // and GNU screen window-title (\x1bk...\x1b\\) control strings that
+    // xterm-4.0.0's EscapeParser does not implement.
+    if (processed.contains('\x1b')) {
+      processed = processed.replaceAll(
+        RegExp(r'\x1b[P_^k][\s\S]*?\x1b\\'),
+        '',
+      );
+    }
+
+    terminal.write(processed);
+
+    // Keep bracketedPasteMode disabled so pasting inside GNU screen (or vim /
+    // subshells inside screen where TERM=screen does not expect \x1b[200~)
+    // never sends raw \x1b[200~...\x1b[201~ escape sequences.
+    if (terminal.bracketedPasteMode) {
+      terminal.setBracketedPasteMode(false);
+    }
+
+    // xterm-4.0.0's Buffer.scrollUp, Buffer.scrollDown, and Buffer.deleteLines
+    // detach moved BufferLine instances (setting line.attached = false), which
+    // happens constantly in GNU screen and causes CellAnchor.attached to be
+    // false and TerminalController.selection to return null. Re-attach any
+    // detached lines immediately.
+    _repairDetachedBufferLines(terminal.mainBuffer);
+    if (terminal.isUsingAltBuffer) {
+      _repairDetachedBufferLines(terminal.altBuffer);
+    }
+  }
+
+  void _markTerminalNeedsPaint() {
+    if (!mounted) return;
+    final viewState = _terminalViewKey.currentState;
+    if (viewState == null) return;
+    try {
+      viewState.renderTerminal.markNeedsPaint();
+    } catch (_) {}
+  }
+
+  void _selectWordAtGlobal(Offset globalPos) {
+    final viewState = _terminalViewKey.currentState;
+    if (viewState == null || terminal.buffer.lines.length == 0) return;
+    try {
+      _repairDetachedBufferLines();
+      final render = viewState.renderTerminal;
+      final localPos = render.globalToLocal(globalPos);
+      final cell = render.getCellOffset(localPos);
+      final boundary = terminal.buffer.getWordBoundary(cell);
+      if (boundary != null) {
+        _terminalController.setCustomSelection(
+          terminal.buffer.createAnchorFromOffset(boundary.begin),
+          terminal.buffer.createAnchorFromOffset(boundary.end),
+          baseOffset: boundary.begin,
+          extentOffset: boundary.end,
+          mode: SelectionMode.line,
+        );
+      }
+    } catch (_) {}
+  }
+
+  void _selectLineAtGlobal(Offset globalFrom, [Offset? globalTo]) {
+    final viewState = _terminalViewKey.currentState;
+    if (viewState == null || terminal.buffer.lines.length == 0) return;
+    try {
+      _repairDetachedBufferLines();
+      final render = viewState.renderTerminal;
+      final fromCell = render.getCellOffset(render.globalToLocal(globalFrom));
+      final toCell = globalTo != null
+          ? render.getCellOffset(render.globalToLocal(globalTo))
+          : fromCell;
+      final startY = (fromCell.y <= toCell.y ? fromCell.y : toCell.y)
+          .clamp(0, terminal.buffer.lines.length - 1);
+      final endY = (fromCell.y <= toCell.y ? toCell.y : fromCell.y)
+          .clamp(0, terminal.buffer.lines.length - 1);
+      final baseOffset = CellOffset(0, startY);
+      final extentOffset = CellOffset(terminal.viewWidth, endY);
+      _terminalController.setCustomSelection(
+        terminal.buffer.createAnchorFromOffset(baseOffset),
+        terminal.buffer.createAnchorFromOffset(extentOffset),
+        baseOffset: baseOffset,
+        extentOffset: extentOffset,
+        mode: SelectionMode.line,
+      );
+    } catch (_) {}
+  }
+
+  void _selectRangeGlobal(
+    Offset globalFrom,
+    Offset globalTo, {
+    required int clickCount,
+  }) {
+    final viewState = _terminalViewKey.currentState;
+    if (viewState == null || terminal.buffer.lines.length == 0) return;
+    try {
+      _repairDetachedBufferLines();
+      final render = viewState.renderTerminal;
+      final localFrom = render.globalToLocal(globalFrom);
+      final localTo = render.globalToLocal(globalTo);
+
+      if (clickCount >= 3) {
+        _selectLineAtGlobal(globalFrom, globalTo);
+        return;
+      }
+
+      if (clickCount == 2) {
+        final fromCell = render.getCellOffset(localFrom);
+        final toCell = render.getCellOffset(localTo);
+        final fromBoundary = terminal.buffer.getWordBoundary(fromCell);
+        final toBoundary = terminal.buffer.getWordBoundary(toCell);
+        if (fromBoundary != null && toBoundary != null) {
+          final merged = fromBoundary.merge(toBoundary);
+          _terminalController.setCustomSelection(
+            terminal.buffer.createAnchorFromOffset(merged.begin),
+            terminal.buffer.createAnchorFromOffset(merged.end),
+            baseOffset: merged.begin,
+            extentOffset: merged.end,
+            mode: SelectionMode.line,
+          );
+          return;
+        }
+      }
+
+      var fromCell = render.getCellOffset(localFrom);
+      var toCell = render.getCellOffset(localTo);
+      final isForward = toCell.y > fromCell.y ||
+          (toCell.y == fromCell.y && toCell.x >= fromCell.x);
+
+      if (isForward) {
+        toCell = CellOffset(
+          (toCell.x + 1).clamp(0, terminal.viewWidth),
+          toCell.y,
+        );
+      } else {
+        fromCell = CellOffset(
+          (fromCell.x + 1).clamp(0, terminal.viewWidth),
+          fromCell.y,
+        );
+      }
+
+      _terminalController.setCustomSelection(
+        terminal.buffer.createAnchorFromOffset(fromCell),
+        terminal.buffer.createAnchorFromOffset(toCell),
+        baseOffset: fromCell,
+        extentOffset: toCell,
+        mode: SelectionMode.line,
+      );
+    } catch (_) {}
+  }
+
+  void _handlePointerDown(PointerDownEvent event) {
+    if (!_terminalFocusNode.hasFocus) {
+      _terminalFocusNode.requestFocus();
+    }
+
+    if (event.kind == PointerDeviceKind.touch) {
+      return;
+    }
+
+    final isSecondary = (event.buttons & kSecondaryMouseButton) != 0 ||
+        (Platform.isMacOS &&
+            (event.buttons & kPrimaryMouseButton) != 0 &&
+            HardwareKeyboard.instance.isControlPressed);
+
+    if (isSecondary) {
+      _isPrimaryPointerDown = false;
+      if (Platform.isMacOS &&
+          (event.buttons & kPrimaryMouseButton) != 0 &&
+          HardwareKeyboard.instance.isControlPressed) {
+        _showContextMenu(event.position);
+      }
+      return;
+    }
+
+    if ((event.buttons & kPrimaryMouseButton) != 0) {
+      _isPrimaryPointerDown = true;
+      final now = DateTime.now();
+      if (_lastPointerDownTime != null &&
+          _lastPointerDownPosition != null &&
+          now.difference(_lastPointerDownTime!) <= kDoubleTapTimeout &&
+          (event.position - _lastPointerDownPosition!).distance <= kDoubleTapSlop) {
+        _pointerClickCount = (_pointerClickCount % 3) + 1;
+      } else {
+        _pointerClickCount = 1;
+      }
+      _lastPointerDownTime = now;
+      _lastPointerDownPosition = event.position;
+
+      if (_pointerClickCount == 1) {
+        if (HardwareKeyboard.instance.isShiftPressed &&
+            _selectionDragOriginGlobal != null) {
+          _selectRangeGlobal(
+            _selectionDragOriginGlobal!,
+            event.position,
+            clickCount: 1,
+          );
+          return;
+        }
+        _selectionDragOriginGlobal = event.position;
+        if (_terminalController.selection != null) {
+          _terminalController.forceClearSelection();
+        }
+      } else if (_pointerClickCount == 2) {
+        _selectionDragOriginGlobal = event.position;
+        _selectWordAtGlobal(event.position);
+      } else if (_pointerClickCount >= 3) {
+        _selectionDragOriginGlobal = event.position;
+        _selectLineAtGlobal(event.position);
+      }
+    }
+  }
+
+  void _handlePointerMove(PointerMoveEvent event) {
+    if (event.kind == PointerDeviceKind.touch) {
+      return;
+    }
+    if (!_isPrimaryPointerDown || (event.buttons & kPrimaryMouseButton) == 0) {
+      return;
+    }
+    final origin = _selectionDragOriginGlobal;
+    if (origin == null) return;
+
+    if (_pointerClickCount == 1 && (event.position - origin).distance < 2.0) {
+      return;
+    }
+
+    _selectRangeGlobal(
+      origin,
+      event.position,
+      clickCount: _pointerClickCount,
+    );
+  }
+
+  void _handlePointerUp(PointerUpEvent event) {
+    _isPrimaryPointerDown = false;
+    _markTerminalNeedsPaint();
+  }
+
+  void _handlePointerCancel(PointerCancelEvent event) {
+    _isPrimaryPointerDown = false;
+  }
 
   void _handlePrivateOSC(String code, List<String> args) {
     // Support OSC 52 clipboard integration (\x1b]52;c;<base64>\x07) used by
@@ -405,26 +754,36 @@ class _TerminalTabWidgetState extends State<TerminalTabWidget>
     final data = await Clipboard.getData(Clipboard.kTextPlain);
     final text = data?.text;
     if (text != null && text.isNotEmpty) {
-      // Normalize Windows CRLF (\r\n) and LF (\n) to CR (\r) so vim and remote
-      // PTYs do not insert double newlines or literal ^M characters.
+      // Normalize Windows CRLF (\r\n) and LF (\n) to CR (\r) so GNU screen,
+      // vim, and remote PTYs do not insert double newlines or literal ^M.
       final normalized = text.replaceAll('\r\n', '\r').replaceAll('\n', '\r');
-      terminal.paste(normalized);
-      _terminalController.clearSelection();
+      // Send via textInput rather than bracketed paste (\x1b[200~...\x1b[201~)
+      // so pasting works reliably inside GNU screen sessions as well as shells
+      // and editors.
+      terminal.textInput(normalized);
+      _terminalController.forceClearSelection();
     }
     _requestTerminalFocus();
   }
 
   void _selectAll() {
-    _terminalController.setSelection(
-      terminal.buffer.createAnchor(0, 0),
-      terminal.buffer.createAnchor(terminal.viewWidth, terminal.buffer.height - 1),
+    if (terminal.buffer.height <= 0) return;
+    _repairDetachedBufferLines();
+    final baseOffset = const CellOffset(0, 0);
+    final extentOffset = CellOffset(terminal.viewWidth, terminal.buffer.height - 1);
+    _terminalController.setCustomSelection(
+      terminal.buffer.createAnchorFromOffset(baseOffset),
+      terminal.buffer.createAnchorFromOffset(extentOffset),
+      baseOffset: baseOffset,
+      extentOffset: extentOffset,
+      mode: SelectionMode.line,
     );
     _requestTerminalFocus();
   }
 
   void _clearScreen() {
     terminal.eraseDisplay();
-    _terminalController.clearSelection();
+    _terminalController.forceClearSelection();
     _requestTerminalFocus();
   }
 
@@ -541,7 +900,7 @@ class _TerminalTabWidgetState extends State<TerminalTabWidget>
           (isCtrl && isShift && event.logicalKey == LogicalKeyboardKey.keyC)) {
         if (event is KeyDownEvent) {
           _copySelection();
-          _terminalController.clearSelection();
+          _terminalController.forceClearSelection();
         }
         return KeyEventResult.handled;
       }
@@ -550,7 +909,7 @@ class _TerminalTabWidgetState extends State<TerminalTabWidget>
         if (event is KeyDownEvent && _terminalController.selection != null) {
           _consumedCopyOnCtrlCDown = true;
           _copySelection();
-          _terminalController.clearSelection();
+          _terminalController.forceClearSelection();
           return KeyEventResult.handled;
         }
         if (event is KeyRepeatEvent && _consumedCopyOnCtrlCDown) {
@@ -786,17 +1145,17 @@ Total Characters Logged: $_screenLogBytesWritten
       session.session.stdout.listen(
         (data) {
           final text = utf8.decode(data, allowMalformed: true);
-          terminal.write(text);
+          _writeToTerminal(text);
           _logStreamData(text);
         },
         onError: (err) {
           final errStr = '\r\n[SSH stdout error: $err]\r\n';
-          terminal.write(errStr);
+          _writeToTerminal(errStr);
           _logStreamData(errStr);
         },
         onDone: () {
           final doneStr = '\r\n[Session closed]\r\n';
-          terminal.write(doneStr);
+          _writeToTerminal(doneStr);
           _logStreamData(doneStr);
           _handleSessionDone();
         },
@@ -805,7 +1164,7 @@ Total Characters Logged: $_screenLogBytesWritten
       // Pipe SSH stderr to terminal & screen log
       session.session.stderr.listen((data) {
         final text = utf8.decode(data, allowMalformed: true);
-        terminal.write(text);
+        _writeToTerminal(text);
         _logStreamData(text);
       });
 
@@ -1250,29 +1609,37 @@ Total Characters Logged: $_screenLogBytesWritten
             removeBottom: true,
             removeLeft: true,
             removeRight: true,
-            child: TerminalView(
-              terminal,
-              controller: _terminalController,
-              scrollController: _scrollController,
-              focusNode: _terminalFocusNode,
-              padding: EdgeInsets.zero,
-              autofocus: true,
-              hardwareKeyboardOnly: Platform.isWindows || Platform.isLinux || Platform.isMacOS,
-              theme: _currentTheme,
-              textStyle: TerminalStyle(
-                fontSize: _fontSize,
+            child: Listener(
+              behavior: HitTestBehavior.translucent,
+              onPointerDown: _handlePointerDown,
+              onPointerMove: _handlePointerMove,
+              onPointerUp: _handlePointerUp,
+              onPointerCancel: _handlePointerCancel,
+              child: TerminalView(
+                terminal,
+                key: _terminalViewKey,
+                controller: _terminalController,
+                scrollController: _scrollController,
+                focusNode: _terminalFocusNode,
+                padding: EdgeInsets.zero,
+                autofocus: true,
+                hardwareKeyboardOnly: Platform.isWindows || Platform.isLinux || Platform.isMacOS,
+                theme: _currentTheme,
+                textStyle: TerminalStyle(
+                  fontSize: _fontSize,
+                ),
+                backgroundOpacity: 1.0,
+                shortcuts: const <ShortcutActivator, Intent>{},
+                onKeyEvent: _handleTerminalKeyEvent,
+                onTapUp: (details, offset) {
+                  if (!_terminalFocusNode.hasFocus) {
+                    _terminalFocusNode.requestFocus();
+                  }
+                },
+                onSecondaryTapUp: (details, offset) {
+                  _showContextMenu(details.globalPosition);
+                },
               ),
-              backgroundOpacity: 1.0,
-              shortcuts: const <ShortcutActivator, Intent>{},
-              onKeyEvent: _handleTerminalKeyEvent,
-              onTapUp: (details, offset) {
-                if (!_terminalFocusNode.hasFocus) {
-                  _terminalFocusNode.requestFocus();
-                }
-              },
-              onSecondaryTapUp: (details, offset) {
-                _showContextMenu(details.globalPosition);
-              },
             ),
           ),
         ),
