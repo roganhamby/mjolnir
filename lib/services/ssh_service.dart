@@ -266,12 +266,24 @@ class SshService {
     ServerConfig server, {
     int terminalWidth = 80,
     int terminalHeight = 24,
+    int terminalPixelWidth = 0,
+    int terminalPixelHeight = 0,
+    int Function()? getTerminalWidth,
+    int Function()? getTerminalHeight,
+    int Function()? getTerminalPixelWidth,
+    int Function()? getTerminalPixelHeight,
   }) async {
     final client = await connect(server);
+    final width = getTerminalWidth?.call() ?? terminalWidth;
+    final height = getTerminalHeight?.call() ?? terminalHeight;
+    final pixelWidth = getTerminalPixelWidth?.call() ?? terminalPixelWidth;
+    final pixelHeight = getTerminalPixelHeight?.call() ?? terminalPixelHeight;
     final session = await client.shell(
       pty: SSHPtyConfig(
-        width: terminalWidth,
-        height: terminalHeight,
+        width: width > 0 ? width : 80,
+        height: height > 0 ? height : 24,
+        pixelWidth: pixelWidth > 0 ? pixelWidth : 0,
+        pixelHeight: pixelHeight > 0 ? pixelHeight : 0,
       ),
     );
 

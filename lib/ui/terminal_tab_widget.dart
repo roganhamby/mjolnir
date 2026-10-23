@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'package:file_picker/file_picker.dart';
@@ -48,9 +49,11 @@ class TerminalTabWidget extends StatefulWidget {
   State<TerminalTabWidget> createState() => _TerminalTabWidgetState();
 }
 
-class _TerminalTabWidgetState extends State<TerminalTabWidget> {
+class _TerminalTabWidgetState extends State<TerminalTabWidget>
+    with WidgetsBindingObserver {
   late final Terminal terminal;
   late final TerminalController _terminalController;
+  late final ScrollController _scrollController;
   late final FocusNode _terminalFocusNode;
   SshSession? _sshSession;
   bool _isLoading = true;
@@ -59,6 +62,8 @@ class _TerminalTabWidgetState extends State<TerminalTabWidget> {
   late double _fontSize;
   late String _currentThemeName;
   late TerminalTheme _currentTheme;
+  int _lastCellWidth = 0;
+  int _lastCellHeight = 0;
 
   // Screen logging state
   bool _isScreenLogging = false;
@@ -86,15 +91,108 @@ class _TerminalTabWidgetState extends State<TerminalTabWidget> {
     });
   }
 
+  void _syncRemotePtySize({
+    int? width,
+    int? height,
+    int? cellWidth,
+    int? cellHeight,
+  }) {
+    final session = _sshSession?.session;
+    if (session == null) return;
+    final w = width ?? terminal.viewWidth;
+    final h = height ?? terminal.viewHeight;
+    if (w <= 0 || h <= 0) return;
+    final cw = cellWidth ?? _lastCellWidth;
+    final ch = cellHeight ?? _lastCellHeight;
+    try {
+      session.resizeTerminal(
+        w,
+        h,
+        cw > 0 ? w * cw : 0,
+        ch > 0 ? h * ch : 0,
+      );
+    } catch (_) {}
+  }
+
+  void _handleTerminalResize(
+    int width,
+    int height,
+    int cellWidth,
+    int cellHeight,
+  ) {
+    _lastCellWidth = cellWidth;
+    _lastCellHeight = cellHeight;
+
+    // Track the cursor line across xterm's Buffer.resize + reflow so that
+    // unwrapping/wrapping lines when going full screen keeps cursorY aligned
+    // with the actual prompt line and resets full-height vertical margins.
+    CellAnchor? cursorAnchor;
+    if (!terminal.isUsingAltBuffer && terminal.mainBuffer.lines.isNotEmpty) {
+      final absY = terminal.mainBuffer.absoluteCursorY.clamp(
+        0,
+        terminal.mainBuffer.lines.length - 1,
+      );
+      final curX = terminal.mainBuffer.cursorX.clamp(
+        0,
+        terminal.viewWidth > 0 ? terminal.viewWidth - 1 : 0,
+      );
+      cursorAnchor = terminal.mainBuffer.createAnchor(curX, absY);
+    }
+
+    _syncRemotePtySize(
+      width: width,
+      height: height,
+      cellWidth: cellWidth,
+      cellHeight: cellHeight,
+    );
+
+    scheduleMicrotask(() {
+      if (cursorAnchor != null) {
+        if (cursorAnchor.attached && !terminal.isUsingAltBuffer) {
+          final mainBuf = terminal.mainBuffer;
+          var changed = false;
+          // Trim excess trailing empty lines pushed past viewHeight by reflow
+          while (mainBuf.lines.length > terminal.viewHeight &&
+              mainBuf.lines.length - 1 > cursorAnchor.y &&
+              mainBuf.lines[mainBuf.lines.length - 1].getTrimmedLength() == 0) {
+            mainBuf.lines.pop();
+            changed = true;
+          }
+          final targetCursorY = (cursorAnchor.y - mainBuf.scrollBack).clamp(
+            0,
+            terminal.viewHeight > 0 ? terminal.viewHeight - 1 : 0,
+          );
+          final targetCursorX = cursorAnchor.x.clamp(
+            0,
+            terminal.viewWidth > 0 ? terminal.viewWidth - 1 : 0,
+          );
+          if (mainBuf.cursorX != targetCursorX ||
+              mainBuf.cursorY != targetCursorY) {
+            mainBuf.setCursor(targetCursorX, targetCursorY);
+            changed = true;
+          }
+          mainBuf.resetVerticalMargins();
+          if (changed && mounted) {
+            terminal.notifyListeners();
+          }
+        }
+        cursorAnchor.dispose();
+      }
+    });
+  }
+
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     _fontSize = widget.fontSize;
     terminal = Terminal(
       maxLines: 10000,
       platform: _getTerminalPlatform(),
+      onResize: _handleTerminalResize,
     );
     _terminalController = TerminalController();
+    _scrollController = ScrollController();
     _terminalFocusNode = FocusNode();
     _currentThemeName = widget.server.terminalTheme.isNotEmpty
         ? widget.server.terminalTheme
@@ -105,13 +203,36 @@ class _TerminalTabWidgetState extends State<TerminalTabWidget> {
   }
 
   @override
+  void didChangeMetrics() {
+    super.didChangeMetrics();
+    if (!mounted) return;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      if (!terminal.isUsingAltBuffer) {
+        terminal.mainBuffer.resetVerticalMargins();
+      }
+      _syncRemotePtySize();
+    });
+  }
+
+  @override
   void didUpdateWidget(TerminalTabWidget oldWidget) {
     super.didUpdateWidget(oldWidget);
     if (!oldWidget.isActive && widget.isActive) {
       _requestTerminalFocus();
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) {
+          _syncRemotePtySize();
+        }
+      });
     }
     if (oldWidget.fontSize != widget.fontSize) {
       _fontSize = widget.fontSize;
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) {
+          _syncRemotePtySize();
+        }
+      });
     }
     if (oldWidget.server.terminalTheme != widget.server.terminalTheme &&
         widget.server.terminalTheme.isNotEmpty) {
@@ -136,6 +257,9 @@ class _TerminalTabWidgetState extends State<TerminalTabWidget> {
         _fontSize += 1.0;
       });
       widget.onFontSizeChanged?.call(_fontSize);
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) _syncRemotePtySize();
+      });
     }
     _requestTerminalFocus();
   }
@@ -146,6 +270,9 @@ class _TerminalTabWidgetState extends State<TerminalTabWidget> {
         _fontSize -= 1.0;
       });
       widget.onFontSizeChanged?.call(_fontSize);
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) _syncRemotePtySize();
+      });
     }
     _requestTerminalFocus();
   }
@@ -155,6 +282,9 @@ class _TerminalTabWidgetState extends State<TerminalTabWidget> {
       _fontSize = 13.0;
     });
     widget.onFontSizeChanged?.call(_fontSize);
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) _syncRemotePtySize();
+    });
     _requestTerminalFocus();
   }
 
@@ -510,13 +640,38 @@ Total Characters Logged: $_screenLogBytesWritten
     _logStreamData(connectMsg);
 
     try {
+      // Allow the first layout pass to complete so TerminalView has measured
+      // the actual window / full-screen dimensions before requesting the PTY.
+      await WidgetsBinding.instance.endOfFrame;
+      if (!mounted) return;
+
       final session = await widget.sshService.startShellSession(
         widget.server,
-        terminalWidth: 80,
-        terminalHeight: 24,
+        terminalWidth: terminal.viewWidth > 0 ? terminal.viewWidth : 80,
+        terminalHeight: terminal.viewHeight > 0 ? terminal.viewHeight : 24,
+        terminalPixelWidth: _lastCellWidth > 0 ? terminal.viewWidth * _lastCellWidth : 0,
+        terminalPixelHeight: _lastCellHeight > 0 ? terminal.viewHeight * _lastCellHeight : 0,
+        getTerminalWidth: () => terminal.viewWidth,
+        getTerminalHeight: () => terminal.viewHeight,
+        getTerminalPixelWidth: () =>
+            _lastCellWidth > 0 ? terminal.viewWidth * _lastCellWidth : 0,
+        getTerminalPixelHeight: () =>
+            _lastCellHeight > 0 ? terminal.viewHeight * _lastCellHeight : 0,
       );
 
+      if (!mounted) {
+        session.close();
+        return;
+      }
+
       _sshSession = session;
+
+      // Ensure remote PTY and local scroll margins match the current viewport
+      // immediately (in case the window was resized/maximized while connecting).
+      if (!terminal.isUsingAltBuffer) {
+        terminal.mainBuffer.resetVerticalMargins();
+      }
+      _syncRemotePtySize();
 
       // Pipe SSH stdout to terminal & screen log
       session.session.stdout.listen(
@@ -563,12 +718,18 @@ Total Characters Logged: $_screenLogBytesWritten
       };
 
       // Handle terminal resize events
-      terminal.onResize = (width, height, pixelWidth, pixelHeight) {
-        session.session.resizeTerminal(width, height, pixelWidth, pixelHeight);
-      };
+      terminal.onResize = _handleTerminalResize;
 
       setState(() {
         _isLoading = false;
+      });
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) {
+          if (!terminal.isUsingAltBuffer) {
+            terminal.mainBuffer.resetVerticalMargins();
+          }
+          _syncRemotePtySize();
+        }
       });
       _requestTerminalFocus();
     } catch (e) {
@@ -593,9 +754,11 @@ Total Characters Logged: $_screenLogBytesWritten
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     _sshSession?.close();
     _stopScreenLogging();
     _terminalController.dispose();
+    _scrollController.dispose();
     _terminalFocusNode.dispose();
     super.dispose();
   }
@@ -965,26 +1128,35 @@ Total Characters Logged: $_screenLogBytesWritten
 
         // Terminal Window
         Expanded(
-          child: TerminalView(
-            terminal,
-            controller: _terminalController,
-            focusNode: _terminalFocusNode,
-            autofocus: true,
-            hardwareKeyboardOnly: Platform.isWindows || Platform.isLinux || Platform.isMacOS,
-            theme: _currentTheme,
-            textStyle: TerminalStyle(
-              fontSize: _fontSize,
+          child: MediaQuery.removePadding(
+            context: context,
+            removeTop: true,
+            removeBottom: true,
+            removeLeft: true,
+            removeRight: true,
+            child: TerminalView(
+              terminal,
+              controller: _terminalController,
+              scrollController: _scrollController,
+              focusNode: _terminalFocusNode,
+              padding: EdgeInsets.zero,
+              autofocus: true,
+              hardwareKeyboardOnly: Platform.isWindows || Platform.isLinux || Platform.isMacOS,
+              theme: _currentTheme,
+              textStyle: TerminalStyle(
+                fontSize: _fontSize,
+              ),
+              backgroundOpacity: 1.0,
+              onKeyEvent: _handleTerminalKeyEvent,
+              onTapUp: (details, offset) {
+                if (!_terminalFocusNode.hasFocus) {
+                  _terminalFocusNode.requestFocus();
+                }
+              },
+              onSecondaryTapUp: (details, offset) {
+                _showContextMenu(details.globalPosition);
+              },
             ),
-            backgroundOpacity: 1.0,
-            onKeyEvent: _handleTerminalKeyEvent,
-            onTapUp: (details, offset) {
-              if (!_terminalFocusNode.hasFocus) {
-                _terminalFocusNode.requestFocus();
-              }
-            },
-            onSecondaryTapUp: (details, offset) {
-              _showContextMenu(details.globalPosition);
-            },
           ),
         ),
 
