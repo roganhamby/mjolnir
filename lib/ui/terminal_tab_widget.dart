@@ -64,6 +64,7 @@ class _TerminalTabWidgetState extends State<TerminalTabWidget>
   late TerminalTheme _currentTheme;
   int _lastCellWidth = 0;
   int _lastCellHeight = 0;
+  bool _consumedCopyOnCtrlCDown = false;
 
   // Screen logging state
   bool _isScreenLogging = false;
@@ -190,8 +191,14 @@ class _TerminalTabWidgetState extends State<TerminalTabWidget>
       maxLines: 10000,
       platform: _getTerminalPlatform(),
       onResize: _handleTerminalResize,
+      onPrivateOSC: _handlePrivateOSC,
     );
-    _terminalController = TerminalController();
+    // Disable sending mouse tap events to the remote application so that
+    // mouse drag selection and right-click context menu (Copy / Paste) work
+    // reliably even when vim enables mouse mode (set mouse=a).
+    _terminalController = TerminalController(
+      pointerInputs: const PointerInputs.none(),
+    );
     _scrollController = ScrollController();
     _terminalFocusNode = FocusNode();
     _currentThemeName = widget.server.terminalTheme.isNotEmpty
@@ -290,6 +297,80 @@ class _TerminalTabWidgetState extends State<TerminalTabWidget>
 
   // --- Copy & Paste Support ---
 
+  void _handlePrivateOSC(String code, List<String> args) {
+    // Support OSC 52 clipboard integration (\x1b]52;c;<base64>\x07) used by
+    // vim / neovim / tmux to copy yanked text to the local system clipboard.
+    if (code == '52' && args.length >= 2) {
+      final payload = args[1];
+      if (payload.isNotEmpty && payload != '?') {
+        try {
+          final cleaned = payload.replaceAll(RegExp(r'\s+'), '');
+          final decoded = utf8.decode(base64.decode(cleaned), allowMalformed: true);
+          if (decoded.isNotEmpty) {
+            Clipboard.setData(ClipboardData(text: decoded));
+          }
+        } catch (_) {}
+      }
+    }
+  }
+
+  String _extractSelectedText(BufferRange selection) {
+    final range = selection.normalized;
+    final builder = StringBuffer();
+    final buffer = terminal.buffer;
+    final segments = range.toSegments().toList();
+
+    for (var sIdx = 0; sIdx < segments.length; sIdx++) {
+      final segment = segments[sIdx];
+      if (segment.line < 0 || segment.line >= buffer.height) {
+        continue;
+      }
+      final line = buffer.lines[segment.line];
+      if (!(segment.line == range.begin.y ||
+          segment.line == 0 ||
+          line.isWrapped)) {
+        builder.write('\n');
+      }
+
+      final from = (segment.start ?? 0).clamp(0, line.length);
+      final trimmedEnd = line.getTrimmedLength(line.length);
+      var nonSpaceEnd = trimmedEnd;
+      if (!line.isWrapped) {
+        while (nonSpaceEnd > 0) {
+          final cp = line.getCodePoint(nonSpaceEnd - 1);
+          if (cp != 0 && cp != 0x20) {
+            final w = line.getWidth(nonSpaceEnd - 1);
+            if (w > 1) {
+              nonSpaceEnd = (nonSpaceEnd - 1 + w).clamp(0, line.length);
+            }
+            break;
+          }
+          nonSpaceEnd--;
+        }
+      }
+
+      final maxEnd = segment.end != null
+          ? segment.end!.clamp(0, line.length)
+          : line.length;
+      final effectiveEnd = maxEnd < nonSpaceEnd ? maxEnd : nonSpaceEnd;
+
+      for (var i = from; i < effectiveEnd; i++) {
+        final codePoint = line.getCodePoint(i);
+        final width = line.getWidth(i);
+        if (codePoint == 0) {
+          if (i > 0 && line.getWidth(i - 1) == 2) {
+            continue;
+          }
+          builder.write(' ');
+        } else if (i + width <= maxEnd) {
+          builder.writeCharCode(codePoint);
+        }
+      }
+    }
+
+    return builder.toString();
+  }
+
   Future<void> _copySelection({bool showNotification = true}) async {
     final selection = _terminalController.selection;
     if (selection == null) {
@@ -305,7 +386,7 @@ class _TerminalTabWidgetState extends State<TerminalTabWidget>
       return;
     }
 
-    final text = terminal.buffer.getText(selection);
+    final text = _extractSelectedText(selection);
     if (text.isNotEmpty) {
       await Clipboard.setData(ClipboardData(text: text));
       if (showNotification && mounted) {
@@ -324,7 +405,10 @@ class _TerminalTabWidgetState extends State<TerminalTabWidget>
     final data = await Clipboard.getData(Clipboard.kTextPlain);
     final text = data?.text;
     if (text != null && text.isNotEmpty) {
-      terminal.paste(text);
+      // Normalize Windows CRLF (\r\n) and LF (\n) to CR (\r) so vim and remote
+      // PTYs do not insert double newlines or literal ^M characters.
+      final normalized = text.replaceAll('\r\n', '\r').replaceAll('\n', '\r');
+      terminal.paste(normalized);
       _terminalController.clearSelection();
     }
     _requestTerminalFocus();
@@ -406,7 +490,7 @@ class _TerminalTabWidgetState extends State<TerminalTabWidget>
               const Text('Select All', style: TextStyle(fontSize: 13, color: Colors.white)),
               const Spacer(),
               Text(
-                Platform.isMacOS ? '⌘A' : 'Ctrl+A',
+                Platform.isMacOS ? '⌘A' : 'Ctrl+Shift+A',
                 style: const TextStyle(fontSize: 11, color: Colors.grey),
               ),
             ],
@@ -440,31 +524,56 @@ class _TerminalTabWidgetState extends State<TerminalTabWidget>
   }
 
   KeyEventResult _handleTerminalKeyEvent(FocusNode focusNode, KeyEvent event) {
-    if (event is KeyDownEvent) {
+    if (event is KeyUpEvent) {
+      if (event.logicalKey == LogicalKeyboardKey.keyC) {
+        _consumedCopyOnCtrlCDown = false;
+      }
+      return KeyEventResult.ignored;
+    }
+
+    if (event is KeyDownEvent || event is KeyRepeatEvent) {
       final isMeta = HardwareKeyboard.instance.isMetaPressed;
       final isCtrl = HardwareKeyboard.instance.isControlPressed;
       final isShift = HardwareKeyboard.instance.isShiftPressed;
 
       // Copy: Cmd+C (macOS) or Ctrl+Shift+C or (Ctrl+C if text is selected)
       if ((isMeta && event.logicalKey == LogicalKeyboardKey.keyC) ||
-          (isCtrl && isShift && event.logicalKey == LogicalKeyboardKey.keyC) ||
-          (isCtrl && event.logicalKey == LogicalKeyboardKey.keyC && _terminalController.selection != null)) {
-        _copySelection();
-        _terminalController.clearSelection();
+          (isCtrl && isShift && event.logicalKey == LogicalKeyboardKey.keyC)) {
+        if (event is KeyDownEvent) {
+          _copySelection();
+          _terminalController.clearSelection();
+        }
         return KeyEventResult.handled;
+      }
+
+      if (isCtrl && !isShift && event.logicalKey == LogicalKeyboardKey.keyC) {
+        if (event is KeyDownEvent && _terminalController.selection != null) {
+          _consumedCopyOnCtrlCDown = true;
+          _copySelection();
+          _terminalController.clearSelection();
+          return KeyEventResult.handled;
+        }
+        if (event is KeyRepeatEvent && _consumedCopyOnCtrlCDown) {
+          return KeyEventResult.handled;
+        }
       }
 
       // Paste: Cmd+V (macOS) or Ctrl+Shift+V or Ctrl+V
       if ((isMeta && event.logicalKey == LogicalKeyboardKey.keyV) ||
           (isCtrl && isShift && event.logicalKey == LogicalKeyboardKey.keyV) ||
           (isCtrl && event.logicalKey == LogicalKeyboardKey.keyV)) {
-        _pasteToTerminal();
+        if (event is KeyDownEvent) {
+          _pasteToTerminal();
+        }
         return KeyEventResult.handled;
       }
 
-      // Select All: Cmd+A (macOS)
-      if (isMeta && event.logicalKey == LogicalKeyboardKey.keyA) {
-        _selectAll();
+      // Select All: Cmd+A (macOS) or Ctrl+Shift+A (Windows/Linux)
+      if ((isMeta && event.logicalKey == LogicalKeyboardKey.keyA) ||
+          (isCtrl && isShift && event.logicalKey == LogicalKeyboardKey.keyA)) {
+        if (event is KeyDownEvent) {
+          _selectAll();
+        }
         return KeyEventResult.handled;
       }
     }
@@ -702,6 +811,13 @@ Total Characters Logged: $_screenLogBytesWritten
 
       // Terminal user input to SSH stdin
       terminal.onOutput = (data) {
+        if (data == '\x1b[>0;0;0c') {
+          // Report modern xterm patch level (279) for Secondary Device
+          // Attributes (DA2) so vim enables bracketed paste (\x1b[?2004h)
+          //instead of treating the terminal as version 0.
+          session.session.stdin.add(utf8.encode('\x1b[>0;279;0c'));
+          return;
+        }
         if (_ctrlModifierActive && data.isNotEmpty) {
           final code = data.toLowerCase().codeUnitAt(0);
           setState(() => _ctrlModifierActive = false);
@@ -1147,6 +1263,7 @@ Total Characters Logged: $_screenLogBytesWritten
                 fontSize: _fontSize,
               ),
               backgroundOpacity: 1.0,
+              shortcuts: const <ShortcutActivator, Intent>{},
               onKeyEvent: _handleTerminalKeyEvent,
               onTapUp: (details, offset) {
                 if (!_terminalFocusNode.hasFocus) {
