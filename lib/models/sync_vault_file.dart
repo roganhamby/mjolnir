@@ -1,5 +1,6 @@
 import 'dart:convert';
 import 'server_config.dart';
+import 'task_item.dart';
 import '../services/crypto_vault_service.dart';
 
 class SyncVaultFile {
@@ -8,6 +9,7 @@ class SyncVaultFile {
   DateTime updatedAt;
   String salt;
   List<ServerConfig> servers;
+  List<TaskItem> tasks;
 
   SyncVaultFile({
     this.version = 1,
@@ -15,14 +17,17 @@ class SyncVaultFile {
     DateTime? updatedAt,
     required this.salt,
     List<ServerConfig>? servers,
+    List<TaskItem>? tasks,
   })  : updatedAt = updatedAt ?? DateTime.now().toUtc(),
-        servers = servers ?? [];
+        servers = servers ?? [],
+        tasks = tasks ?? [];
 
   /// Factory for a brand new empty vault file
   factory SyncVaultFile.createEmpty() {
     return SyncVaultFile(
       salt: CryptoVaultService.generateRandomSalt(),
       servers: [],
+      tasks: [],
     );
   }
 
@@ -37,12 +42,16 @@ class SyncVaultFile {
           'memory_kb': 65536,
         },
         'servers': servers.map((s) => s.toJson()).toList(),
+        'tasks': tasks.map((t) => t.toJson()).toList(),
       };
 
   factory SyncVaultFile.fromJson(Map<String, dynamic> json) {
     final cryptoParams = json['crypto_params'] as Map<String, dynamic>? ?? {};
     final serverList = (json['servers'] as List<dynamic>? ?? [])
         .map((e) => ServerConfig.fromJson(e as Map<String, dynamic>))
+        .toList();
+    final taskList = (json['tasks'] as List<dynamic>? ?? [])
+        .map((e) => TaskItem.fromJson(e as Map<String, dynamic>))
         .toList();
 
     return SyncVaultFile(
@@ -53,6 +62,7 @@ class SyncVaultFile {
           : DateTime.now().toUtc(),
       salt: cryptoParams['salt'] as String? ?? CryptoVaultService.generateRandomSalt(),
       servers: serverList,
+      tasks: taskList,
     );
   }
 

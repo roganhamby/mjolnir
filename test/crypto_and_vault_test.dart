@@ -1,5 +1,6 @@
 import 'package:flutter_test/flutter_test.dart';
 import 'package:mjolnir/models/server_config.dart';
+import 'package:mjolnir/models/task_item.dart';
 import 'package:mjolnir/models/sync_vault_file.dart';
 import 'package:mjolnir/services/crypto_vault_service.dart';
 
@@ -127,6 +128,37 @@ void main() {
       expect(vaultA.servers.length, equals(3));
       final s1 = vaultA.servers.firstWhere((s) => s.id == 's1');
       expect(s1.name, equals('Server 1 v2 (Updated remotely)'));
+    });
+
+    test('TaskItem serialization, importance levels, and due date overdue check', () {
+      final pastDue = DateTime.now().subtract(const Duration(minutes: 5));
+      final futureDue = DateTime.now().add(const Duration(minutes: 30));
+
+      final overdueTask = TaskItem(
+        id: 't1',
+        title: 'Rotate SSH keys',
+        importance: TaskImportance.priority,
+        dueDate: pastDue,
+      );
+      final upcomingTask = TaskItem(
+        id: 't2',
+        title: 'Verify backup logs',
+        importance: TaskImportance.medium,
+        dueDate: futureDue,
+      );
+
+      expect(overdueTask.isOverdue, isTrue);
+      expect(upcomingTask.isOverdue, isFalse);
+
+      final vault = SyncVaultFile(
+        salt: salt,
+        tasks: [overdueTask, upcomingTask],
+      );
+
+      final restored = SyncVaultFile.fromJson(vault.toJson());
+      expect(restored.tasks.length, equals(2));
+      expect(restored.tasks.first.importance, equals(TaskImportance.priority));
+      expect(restored.tasks.first.title, equals('Rotate SSH keys'));
     });
   });
 }

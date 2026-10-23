@@ -6,16 +6,24 @@ import 'package:file_picker/file_picker.dart';
 import 'package:desktop_drop/desktop_drop.dart';
 import 'package:path/path.dart' as p;
 import '../models/server_config.dart';
+import '../models/task_item.dart';
 import '../services/ssh_service.dart';
+import 'task_manager_tab_widget.dart';
 
 class SftpTabWidget extends StatefulWidget {
   final ServerConfig server;
   final SshService sshService;
+  final TaskItem? assignedTask;
+  final VoidCallback? onCompleteAssignedTask;
+  final VoidCallback? onUnassignTask;
 
   const SftpTabWidget({
     super.key,
     required this.server,
     required this.sshService,
+    this.assignedTask,
+    this.onCompleteAssignedTask,
+    this.onUnassignTask,
   });
 
   @override
@@ -339,6 +347,14 @@ class _SftpTabWidgetState extends State<SftpTabWidget> {
                   ),
                 ),
               ),
+              if (widget.assignedTask != null)
+                Flexible(
+                  child: AssignedTabTaskBanner(
+                    task: widget.assignedTask!,
+                    onCompleteTask: () => widget.onCompleteAssignedTask?.call(),
+                    onUnassignTask: () => widget.onUnassignTask?.call(),
+                  ),
+                ),
               const SizedBox(width: 8),
               ElevatedButton.icon(
                 icon: const Icon(Icons.upload, size: 16),

@@ -1,15 +1,19 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:file_picker/file_picker.dart';
+import 'package:intl/intl.dart';
 import 'models/server_config.dart';
+import 'models/task_item.dart';
 import 'services/sync_storage_provider.dart';
 import 'services/vault_manager.dart';
 import 'services/ssh_service.dart';
 import 'ui/terminal_tab_widget.dart';
 import 'ui/sftp_tab_widget.dart';
+import 'ui/task_manager_tab_widget.dart';
 import 'ui/server_edit_dialog.dart';
 import 'theme/ansi_themes.dart';
 import 'package:xterm/xterm.dart';
@@ -47,8 +51,8 @@ class TabItem {
   String title;
   Color? color;
   final IconData icon;
-  final String type; // 'ssh' or 'sftp'
-  final ServerConfig server;
+  final String type; // 'ssh', 'sftp', or 'tasks'
+  final ServerConfig? server;
   String themeName;
   double fontSize;
 
@@ -58,7 +62,7 @@ class TabItem {
     this.color,
     required this.icon,
     required this.type,
-    required this.server,
+    this.server,
     this.themeName = 'Default Dark',
     this.fontSize = 13.0,
   });
@@ -78,6 +82,7 @@ class _MainScreenState extends State<MainScreen> {
   final List<TabItem> _openTabs = [];
   int _activeTabIndex = -1;
   bool _isSidebarCollapsed = false;
+  Timer? _dueDateTimer;
 
   final TextEditingController _masterPasswordController = TextEditingController();
   bool _isDerivingKey = false;
@@ -103,10 +108,16 @@ class _MainScreenState extends State<MainScreen> {
     _vaultManager.init().then((_) {
       if (mounted) setState(() {});
     });
+    _dueDateTimer = Timer.periodic(const Duration(seconds: 5), (_) {
+      if (mounted && _vaultManager.isUnlocked && _vaultManager.tasks.isNotEmpty) {
+        setState(() {});
+      }
+    });
   }
 
   @override
   void dispose() {
+    _dueDateTimer?.cancel();
     _masterPasswordController.dispose();
     super.dispose();
   }
@@ -173,6 +184,59 @@ class _MainScreenState extends State<MainScreen> {
     });
   }
 
+  void _openTaskManagerTab() {
+    final existingIndex = _openTabs.indexWhere((t) => t.type == 'tasks');
+    if (existingIndex >= 0) {
+      setState(() {
+        _activeTabIndex = existingIndex;
+      });
+      return;
+    }
+
+    setState(() {
+      _openTabs.add(
+        TabItem(
+          id: 'tasks-${DateTime.now().millisecondsSinceEpoch}',
+          title: 'Task Manager',
+          icon: Icons.task_alt,
+          color: Colors.amberAccent,
+          type: 'tasks',
+        ),
+      );
+      _activeTabIndex = _openTabs.length - 1;
+    });
+  }
+
+  TaskItem? _getAssignedTaskForTab(String tabId) {
+    for (final task in _vaultManager.tasks) {
+      if (task.assignedTabId == tabId) {
+        return task;
+      }
+    }
+    return null;
+  }
+
+  void _assignTaskToTab(TaskItem task, String? tabId) {
+    setState(() {
+      if (tabId != null) {
+        // Each tab can only have one task assigned at a time
+        for (final other in _vaultManager.tasks) {
+          if (other.assignedTabId == tabId && other.id != task.id) {
+            other.assignedTabId = null;
+          }
+        }
+      }
+      task.assignedTabId = tabId;
+    });
+  }
+
+  Future<void> _completeTask(String taskId) async {
+    await _vaultManager.deleteTask(taskId);
+    if (mounted) {
+      setState(() {});
+    }
+  }
+
   void _launchServerDefault(ServerConfig server) {
     if (server.connectionType == ConnectionType.sftp) {
       _openSftpTab(server);
@@ -181,11 +245,44 @@ class _MainScreenState extends State<MainScreen> {
     }
   }
 
-  void _closeTab(String tabId) {
+  Future<void> _closeTab(String tabId) async {
     final index = _openTabs.indexWhere((t) => t.id == tabId);
-    if (index >= 0) {
+    if (index < 0) return;
+
+    final assignedTask = _getAssignedTaskForTab(tabId);
+    if (assignedTask != null && mounted) {
+      final shouldCloseTask = await showDialog<bool>(
+        context: context,
+        builder: (ctx) => AlertDialog(
+          title: const Text('Active Task Assigned'),
+          content: Text(
+            'This tab has the task "${assignedTask.title}" assigned to it.\n\nWould you like to close (complete) the task too?',
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(ctx).pop(false),
+              child: const Text('Keep Task Open'),
+            ),
+            ElevatedButton(
+              onPressed: () => Navigator.of(ctx).pop(true),
+              child: const Text('Close Task Too'),
+            ),
+          ],
+        ),
+      );
+
+      if (shouldCloseTask == true) {
+        await _vaultManager.deleteTask(assignedTask.id);
+      } else {
+        assignedTask.assignedTabId = null;
+      }
+    }
+
+    if (!mounted) return;
+    final removeIndex = _openTabs.indexWhere((t) => t.id == tabId);
+    if (removeIndex >= 0) {
       setState(() {
-        _openTabs.removeAt(index);
+        _openTabs.removeAt(removeIndex);
         if (_openTabs.isEmpty) {
           _activeTabIndex = -1;
         } else if (_activeTabIndex >= _openTabs.length) {
@@ -297,9 +394,9 @@ class _MainScreenState extends State<MainScreen> {
                   }
                 });
                 // Persist theme to server config
-                if (tab.type == 'ssh') {
-                  tab.server.terminalTheme = selectedTheme;
-                  await _vaultManager.saveServer(tab.server);
+                if (tab.type == 'ssh' && tab.server != null) {
+                  tab.server!.terminalTheme = selectedTheme;
+                  await _vaultManager.saveServer(tab.server!);
                 }
                 if (context.mounted) Navigator.of(ctx).pop();
               },
@@ -489,6 +586,30 @@ class _MainScreenState extends State<MainScreen> {
             ],
           ),
           actions: [
+            TextButton.icon(
+              icon: Icon(
+                Icons.task_alt,
+                size: 18,
+                color: _vaultManager.tasks.any((t) => t.isOverdue)
+                    ? Colors.redAccent
+                    : Colors.amberAccent,
+              ),
+              label: Text(
+                _vaultManager.tasks.isEmpty
+                    ? 'Tasks'
+                    : 'Tasks (${_vaultManager.tasks.length})',
+                style: TextStyle(
+                  fontSize: 12,
+                  color: _vaultManager.tasks.any((t) => t.isOverdue)
+                      ? Colors.redAccent
+                      : Colors.white,
+                  fontWeight: _vaultManager.tasks.any((t) => t.isOverdue)
+                      ? FontWeight.bold
+                      : FontWeight.normal,
+                ),
+              ),
+              onPressed: _openTaskManagerTab,
+            ),
             IconButton(
               icon: const Icon(Icons.file_upload_outlined, size: 20),
               tooltip: 'Import JSON Connections',
@@ -757,18 +878,32 @@ class _MainScreenState extends State<MainScreen> {
               'Select a server from the sidebar to launch an SSH terminal or SFTP browser.',
               style: TextStyle(color: Colors.grey),
             ),
-            if (_isSidebarCollapsed) ...[
-              const SizedBox(height: 16),
-              ElevatedButton.icon(
-                icon: const Icon(Icons.view_sidebar, size: 16),
-                label: const Text('Show Sidebar'),
-                onPressed: () => setState(() => _isSidebarCollapsed = false),
-              ),
-            ],
+            const SizedBox(height: 16),
+            Wrap(
+              spacing: 12,
+              children: [
+                if (_isSidebarCollapsed)
+                  ElevatedButton.icon(
+                    icon: const Icon(Icons.view_sidebar, size: 16),
+                    label: const Text('Show Sidebar'),
+                    onPressed: () => setState(() => _isSidebarCollapsed = false),
+                  ),
+                OutlinedButton.icon(
+                  icon: const Icon(Icons.task_alt, size: 16, color: Colors.amberAccent),
+                  label: const Text('Open Task Manager'),
+                  onPressed: _openTaskManagerTab,
+                ),
+              ],
+            ),
           ],
         ),
       );
     }
+
+    final assignableTabs = _openTabs
+        .where((t) => t.type == 'ssh' || t.type == 'sftp')
+        .map((t) => AssignableTabInfo(id: t.id, title: t.title, type: t.type))
+        .toList();
 
     return Column(
       children: [
@@ -794,6 +929,10 @@ class _MainScreenState extends State<MainScreen> {
                     final tab = _openTabs[index];
                     final isActive = index == _activeTabIndex;
                     final tabHighlightColor = tab.color ?? (isActive ? Colors.amberAccent : Colors.transparent);
+                    final assignedTask = (tab.type == 'ssh' || tab.type == 'sftp')
+                        ? _getAssignedTaskForTab(tab.id)
+                        : null;
+                    final isTaskOverdue = assignedTask?.isOverdue ?? false;
 
                     return GestureDetector(
                       onTap: () => setState(() {
@@ -837,6 +976,62 @@ class _MainScreenState extends State<MainScreen> {
                                 fontWeight: isActive ? FontWeight.bold : FontWeight.normal,
                               ),
                             ),
+                            if (assignedTask != null) ...[
+                              const SizedBox(width: 8),
+                              Container(
+                                padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                                decoration: BoxDecoration(
+                                  color: isTaskOverdue
+                                      ? Colors.redAccent.withAlpha(45)
+                                      : assignedTask.importance.color.withAlpha(35),
+                                  borderRadius: BorderRadius.circular(4),
+                                  border: Border.all(
+                                    color: isTaskOverdue
+                                        ? Colors.redAccent
+                                        : assignedTask.importance.color.withAlpha(140),
+                                    width: 1,
+                                  ),
+                                ),
+                                child: Row(
+                                  mainAxisSize: MainAxisSize.min,
+                                  children: [
+                                    Icon(
+                                      isTaskOverdue ? Icons.warning_amber_rounded : Icons.task_alt,
+                                      size: 11,
+                                      color: isTaskOverdue
+                                          ? Colors.redAccent
+                                          : assignedTask.importance.color,
+                                    ),
+                                    const SizedBox(width: 4),
+                                    ConstrainedBox(
+                                      constraints: const BoxConstraints(maxWidth: 160),
+                                      child: Text(
+                                        assignedTask.title,
+                                        style: TextStyle(
+                                          fontSize: 11,
+                                          fontWeight: FontWeight.w600,
+                                          color: isTaskOverdue ? Colors.redAccent : Colors.white,
+                                        ),
+                                        overflow: TextOverflow.ellipsis,
+                                      ),
+                                    ),
+                                    if (assignedTask.dueDate != null) ...[
+                                      const SizedBox(width: 5),
+                                      Text(
+                                        DateFormat('HH:mm').format(assignedTask.dueDate!.toLocal()),
+                                        style: TextStyle(
+                                          fontSize: 10,
+                                          fontWeight: isTaskOverdue ? FontWeight.bold : FontWeight.normal,
+                                          color: isTaskOverdue
+                                              ? Colors.redAccent
+                                              : Colors.grey.shade300,
+                                        ),
+                                      ),
+                                    ],
+                                  ],
+                                ),
+                              ),
+                            ],
                             const SizedBox(width: 6),
                             InkWell(
                               onTap: () => _renameAndRecolorTab(tab),
@@ -864,32 +1059,64 @@ class _MainScreenState extends State<MainScreen> {
             children: _openTabs.asMap().entries.map((entry) {
               final tabIndex = entry.key;
               final t = entry.value;
-              if (t.type == 'ssh') {
+              final assignedTask = (t.type == 'ssh' || t.type == 'sftp')
+                  ? _getAssignedTaskForTab(t.id)
+                  : null;
+
+              if (t.type == 'tasks') {
+                return TaskManagerTabWidget(
+                  key: ValueKey(t.id),
+                  tasks: _vaultManager.tasks,
+                  availableTabs: assignableTabs,
+                  onSaveTask: (task) async {
+                    await _vaultManager.saveTask(task);
+                    if (mounted) setState(() {});
+                  },
+                  onCompleteTask: _completeTask,
+                  onAssignTaskToTab: _assignTaskToTab,
+                );
+              } else if (t.type == 'ssh') {
+                final server = t.server!;
                 return TerminalTabWidget(
                   key: ValueKey(t.id),
-                  server: t.server,
+                  server: server,
                   sshService: _sshService,
-                  theme: AnsiThemes.all[t.server.terminalTheme] ?? AnsiThemes.all[t.themeName] ?? TerminalThemes.defaultTheme,
-                  initialThemeName: t.server.terminalTheme.isNotEmpty ? t.server.terminalTheme : t.themeName,
+                  theme: AnsiThemes.all[server.terminalTheme] ?? AnsiThemes.all[t.themeName] ?? TerminalThemes.defaultTheme,
+                  initialThemeName: server.terminalTheme.isNotEmpty ? server.terminalTheme : t.themeName,
                   fontSize: t.fontSize,
                   isActive: tabIndex == _activeTabIndex,
+                  assignedTask: assignedTask,
+                  onCompleteAssignedTask: assignedTask != null
+                      ? () => _completeTask(assignedTask.id)
+                      : null,
+                  onUnassignTask: assignedTask != null
+                      ? () => _assignTaskToTab(assignedTask, null)
+                      : null,
                   onFontSizeChanged: (newSize) async {
                     t.fontSize = newSize;
-                    t.server.terminalFontSize = newSize;
-                    await _vaultManager.saveServer(t.server);
+                    server.terminalFontSize = newSize;
+                    await _vaultManager.saveServer(server);
                   },
                   onThemeChanged: (newThemeName) async {
                     t.themeName = newThemeName;
-                    t.server.terminalTheme = newThemeName;
-                    await _vaultManager.saveServer(t.server);
+                    server.terminalTheme = newThemeName;
+                    await _vaultManager.saveServer(server);
                   },
                   onClose: () => _closeTab(t.id),
                 );
               } else {
+                final server = t.server!;
                 return SftpTabWidget(
                   key: ValueKey(t.id),
-                  server: t.server,
+                  server: server,
                   sshService: _sshService,
+                  assignedTask: assignedTask,
+                  onCompleteAssignedTask: assignedTask != null
+                      ? () => _completeTask(assignedTask.id)
+                      : null,
+                  onUnassignTask: assignedTask != null
+                      ? () => _assignTaskToTab(assignedTask, null)
+                      : null,
                 );
               }
             }).toList(),

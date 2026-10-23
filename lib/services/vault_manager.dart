@@ -2,6 +2,7 @@ import 'dart:convert';
 import 'package:flutter/foundation.dart';
 import 'package:cryptography/cryptography.dart';
 import '../models/server_config.dart';
+import '../models/task_item.dart';
 import '../models/sync_vault_file.dart';
 import 'crypto_vault_service.dart';
 import 'sync_storage_provider.dart';
@@ -20,6 +21,7 @@ class VaultManager with ChangeNotifier {
   bool get isUnlocked => _isUnlocked;
   SyncVaultFile? get vault => _vault;
   List<ServerConfig> get servers => _vault?.servers ?? [];
+  List<TaskItem> get tasks => _vault?.tasks ?? [];
   String? get errorMessage => _errorMessage;
 
   /// Loads the vault metadata from storage. Unlocked state is false initially.
@@ -135,6 +137,18 @@ class VaultManager with ChangeNotifier {
       }
     }
 
+    for (final task in importedVault.tasks) {
+      final existingIndex = _vault!.tasks.indexWhere((t) => t.id == task.id);
+      if (existingIndex >= 0) {
+        if (task.updatedAt.isAfter(_vault!.tasks[existingIndex].updatedAt)) {
+          task.assignedTabId = _vault!.tasks[existingIndex].assignedTabId;
+          _vault!.tasks[existingIndex] = task;
+        }
+      } else {
+        _vault!.tasks.add(task);
+      }
+    }
+
     _vault!.updatedAt = DateTime.now().toUtc();
     await storageProvider.saveVault(_vault!);
     notifyListeners();
@@ -148,6 +162,37 @@ class VaultManager with ChangeNotifier {
     }
 
     _vault!.servers.removeWhere((s) => s.id == serverId);
+    _vault!.updatedAt = DateTime.now().toUtc();
+    await storageProvider.saveVault(_vault!);
+    notifyListeners();
+  }
+
+  /// Adds or updates a task and persists the vault.
+  Future<void> saveTask(TaskItem task) async {
+    if (!_isUnlocked || _vault == null) {
+      throw StateError('Cannot modify tasks while vault is locked.');
+    }
+
+    task.updatedAt = DateTime.now().toUtc();
+    final existingIndex = _vault!.tasks.indexWhere((t) => t.id == task.id);
+    if (existingIndex >= 0) {
+      _vault!.tasks[existingIndex] = task;
+    } else {
+      _vault!.tasks.add(task);
+    }
+
+    _vault!.updatedAt = DateTime.now().toUtc();
+    await storageProvider.saveVault(_vault!);
+    notifyListeners();
+  }
+
+  /// Deletes/completes a task by ID and persists the vault.
+  Future<void> deleteTask(String taskId) async {
+    if (!_isUnlocked || _vault == null) {
+      throw StateError('Cannot modify tasks while vault is locked.');
+    }
+
+    _vault!.tasks.removeWhere((t) => t.id == taskId);
     _vault!.updatedAt = DateTime.now().toUtc();
     await storageProvider.saveVault(_vault!);
     notifyListeners();

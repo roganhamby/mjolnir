@@ -7,8 +7,10 @@ import 'package:intl/intl.dart';
 import 'package:path/path.dart' as p;
 import 'package:xterm/xterm.dart';
 import '../models/server_config.dart';
+import '../models/task_item.dart';
 import '../services/ssh_service.dart';
 import '../theme/ansi_themes.dart';
+import 'task_manager_tab_widget.dart';
 
 class TerminalTabWidget extends StatefulWidget {
   final ServerConfig server;
@@ -17,6 +19,9 @@ class TerminalTabWidget extends StatefulWidget {
   final String? initialThemeName;
   final double fontSize;
   final bool isActive;
+  final TaskItem? assignedTask;
+  final VoidCallback? onCompleteAssignedTask;
+  final VoidCallback? onUnassignTask;
   final VoidCallback? onClose;
   final Function(double newFontSize)? onFontSizeChanged;
   final Function(String newThemeName)? onThemeChanged;
@@ -29,6 +34,9 @@ class TerminalTabWidget extends StatefulWidget {
     this.initialThemeName,
     this.fontSize = 13.0,
     this.isActive = true,
+    this.assignedTask,
+    this.onCompleteAssignedTask,
+    this.onUnassignTask,
     this.onClose,
     this.onFontSizeChanged,
     this.onThemeChanged,
@@ -573,7 +581,24 @@ Total Characters Logged: $_screenLogBytesWritten
                   fontSize: 12,
                 ),
               ),
-              const Spacer(),
+              Expanded(
+                child: widget.assignedTask != null
+                    ? Align(
+                        alignment: Alignment.centerLeft,
+                        child: AssignedTabTaskBanner(
+                          task: widget.assignedTask!,
+                          onCompleteTask: () {
+                            widget.onCompleteAssignedTask?.call();
+                            _requestTerminalFocus();
+                          },
+                          onUnassignTask: () {
+                            widget.onUnassignTask?.call();
+                            _requestTerminalFocus();
+                          },
+                        ),
+                      )
+                    : const SizedBox.shrink(),
+              ),
 
               // Screen Logging Controls
               if (_isScreenLogging)
