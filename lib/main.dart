@@ -8,6 +8,7 @@ import 'package:file_picker/file_picker.dart';
 import 'package:intl/intl.dart';
 import 'models/server_config.dart';
 import 'models/task_item.dart';
+import 'services/dropbox_sync_service.dart';
 import 'services/sync_storage_provider.dart';
 import 'services/vault_manager.dart';
 import 'services/ssh_service.dart';
@@ -434,6 +435,466 @@ class _MainScreenState extends State<MainScreen> {
     }
   }
 
+  Future<void> _exportToDropbox() async {
+    final dropbox = _vaultManager.dropboxService;
+    if (!dropbox.config.isConfigured) {
+      _showDropboxDialog();
+      return;
+    }
+
+    try {
+      final dateStr = DateTime.now().toIso8601String().split('T').first;
+      // Write both canonical servers.json and dated export in /App/Mjolnir
+      final path = await _vaultManager.exportVaultToDropbox(fileName: 'servers.json');
+      await _vaultManager.exportVaultToDropbox(fileName: 'mjolnir-servers-$dateStr.json');
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Exported JSON vault to Dropbox ($path).')),
+        );
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Dropbox export failed: $e'),
+            backgroundColor: Colors.red,
+          ),
+        );
+      }
+    }
+  }
+
+  Future<void> _importFromDropbox() async {
+    final dropbox = _vaultManager.dropboxService;
+    if (!dropbox.config.isConfigured) {
+      _showDropboxDialog();
+      return;
+    }
+
+    final importPassController = TextEditingController();
+    final confirm = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Import Newest JSON from Dropbox'),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(
+              'Fetches the newest JSON file from Dropbox directory "${dropbox.normalizedFolderPath}" and merges connections & tasks.',
+              style: const TextStyle(fontSize: 12, color: Colors.grey),
+            ),
+            const SizedBox(height: 12),
+            const Text('Enter the Master Password used to encrypt the Dropbox vault:'),
+            const SizedBox(height: 12),
+            TextField(
+              controller: importPassController,
+              obscureText: true,
+              autofocus: true,
+              decoration: const InputDecoration(
+                labelText: 'Dropbox Vault Master Password',
+                border: OutlineInputBorder(),
+              ),
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(false),
+            child: const Text('Cancel'),
+          ),
+          ElevatedButton.icon(
+            icon: const Icon(Icons.cloud_download_outlined, size: 16),
+            onPressed: () => Navigator.of(ctx).pop(true),
+            label: const Text('Import Newest & Merge'),
+          ),
+        ],
+      ),
+    );
+
+    if (confirm == true && importPassController.text.isNotEmpty && mounted) {
+      try {
+        final result = await _vaultManager.importNewestFromDropbox(
+          importPassController.text,
+        );
+        if (mounted) {
+          setState(() {});
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text(
+                'Imported newest vault from Dropbox (${result.filePath}): ${result.serverCount} server(s) merged.',
+              ),
+            ),
+          );
+        }
+      } catch (e) {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text('Dropbox import failed: $e'),
+              backgroundColor: Colors.red,
+            ),
+          );
+        }
+      }
+    }
+  }
+
+  void _showDropboxDialog() {
+    final dropbox = _vaultManager.dropboxService;
+    final tokenController = TextEditingController(text: dropbox.config.accessToken);
+    final folderController = TextEditingController(
+      text: dropbox.config.folderPath.isEmpty ? '/App/Mjolnir' : dropbox.config.folderPath,
+    );
+    final appKeyController = TextEditingController(text: dropbox.config.appKey ?? '');
+    final appSecretController = TextEditingController(text: dropbox.config.appSecret ?? '');
+    final refreshTokenController = TextEditingController(text: dropbox.config.refreshToken ?? '');
+    final authCodeController = TextEditingController();
+    bool autoSync = dropbox.config.autoSyncOnLoadAndSave;
+    bool showOAuthFields = (dropbox.config.appKey?.isNotEmpty ?? false) ||
+        (dropbox.config.refreshToken?.isNotEmpty ?? false);
+    bool isWorking = false;
+    String? statusMsg;
+    bool isError = false;
+
+    showDialog(
+      context: context,
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setDialogState) {
+          Future<void> saveSettings() async {
+            final newConfig = DropboxConfig(
+              accessToken: tokenController.text.trim(),
+              appKey: appKeyController.text.trim().isEmpty ? null : appKeyController.text.trim(),
+              appSecret: appSecretController.text.trim().isEmpty ? null : appSecretController.text.trim(),
+              refreshToken: refreshTokenController.text.trim().isEmpty ? null : refreshTokenController.text.trim(),
+              folderPath: folderController.text.trim().isEmpty ? '/App/Mjolnir' : folderController.text.trim(),
+              autoSyncOnLoadAndSave: autoSync,
+            );
+            await dropbox.saveConfig(newConfig);
+          }
+
+          return AlertDialog(
+            title: const Row(
+              children: [
+                Icon(Icons.cloud_sync_outlined, color: Colors.amberAccent),
+                SizedBox(width: 10),
+                Text('Dropbox API Sync (/App/Mjolnir)'),
+              ],
+            ),
+            content: SizedBox(
+              width: 500,
+              child: SingleChildScrollView(
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    const Text(
+                      'Sync, import, and export your encrypted JSON vault via Dropbox API. '
+                      'When loading, Mjölnir checks your Dropbox directory (default /App/Mjolnir) and automatically uses the newest vault.',
+                      style: TextStyle(fontSize: 12, color: Colors.grey),
+                    ),
+                    const SizedBox(height: 16),
+                    TextField(
+                      controller: folderController,
+                      decoration: const InputDecoration(
+                        labelText: 'Dropbox Directory Path',
+                        hintText: '/App/Mjolnir',
+                        helperText: 'Mjölnir creates /App/Mjolnir automatically if it does not exist.',
+                        border: OutlineInputBorder(),
+                        isDense: true,
+                      ),
+                    ),
+                    const SizedBox(height: 14),
+                    TextField(
+                      controller: tokenController,
+                      obscureText: true,
+                      decoration: const InputDecoration(
+                        labelText: 'Dropbox API Access Token',
+                        hintText: 'sl.u... (Generated in Dropbox App Console)',
+                        border: OutlineInputBorder(),
+                        isDense: true,
+                      ),
+                    ),
+                    const SizedBox(height: 8),
+                    SwitchListTile(
+                      contentPadding: EdgeInsets.zero,
+                      dense: true,
+                      title: const Text('Use newest vault on load & auto-sync saves'),
+                      subtitle: const Text(
+                        'Compares timestamps on startup and uses the newest JSON from /App/Mjolnir',
+                        style: TextStyle(fontSize: 11, color: Colors.grey),
+                      ),
+                      value: autoSync,
+                      onChanged: (val) => setDialogState(() => autoSync = val),
+                    ),
+                    ExpansionTile(
+                      tilePadding: EdgeInsets.zero,
+                      initiallyExpanded: showOAuthFields,
+                      title: const Text(
+                        'Optional: OAuth2 Refresh Token / App Key',
+                        style: TextStyle(fontSize: 12, color: Colors.grey),
+                      ),
+                      children: [
+                        const SizedBox(height: 6),
+                        TextField(
+                          controller: appKeyController,
+                          decoration: const InputDecoration(
+                            labelText: 'Dropbox App Key',
+                            border: OutlineInputBorder(),
+                            isDense: true,
+                          ),
+                        ),
+                        const SizedBox(height: 10),
+                        TextField(
+                          controller: appSecretController,
+                          obscureText: true,
+                          decoration: const InputDecoration(
+                            labelText: 'Dropbox App Secret',
+                            border: OutlineInputBorder(),
+                            isDense: true,
+                          ),
+                        ),
+                        const SizedBox(height: 10),
+                        TextField(
+                          controller: refreshTokenController,
+                          obscureText: true,
+                          decoration: const InputDecoration(
+                            labelText: 'OAuth2 Refresh Token (if already obtained)',
+                            border: OutlineInputBorder(),
+                            isDense: true,
+                          ),
+                        ),
+                        const SizedBox(height: 10),
+                        Row(
+                          children: [
+                            Expanded(
+                              child: TextField(
+                                controller: authCodeController,
+                                decoration: const InputDecoration(
+                                  labelText: 'Or Exchange Authorization Code',
+                                  border: OutlineInputBorder(),
+                                  isDense: true,
+                                ),
+                              ),
+                            ),
+                            const SizedBox(width: 8),
+                            OutlinedButton(
+                              onPressed: isWorking
+                                  ? null
+                                  : () async {
+                                      if (appKeyController.text.trim().isEmpty ||
+                                          authCodeController.text.trim().isEmpty) {
+                                        setDialogState(() {
+                                          isError = true;
+                                          statusMsg = 'Enter App Key and Authorization Code first.';
+                                        });
+                                        return;
+                                      }
+                                      setDialogState(() {
+                                        isWorking = true;
+                                        statusMsg = 'Exchanging authorization code...';
+                                        isError = false;
+                                      });
+                                      try {
+                                        await saveSettings();
+                                        await dropbox.exchangeAuthorizationCode(
+                                          appKey: appKeyController.text,
+                                          appSecret: appSecretController.text,
+                                          authCode: authCodeController.text,
+                                        );
+                                        tokenController.text = dropbox.config.accessToken;
+                                        refreshTokenController.text = dropbox.config.refreshToken ?? '';
+                                        setDialogState(() {
+                                          isWorking = false;
+                                          isError = false;
+                                          statusMsg = 'OAuth token exchanged and saved!';
+                                        });
+                                      } catch (e) {
+                                        setDialogState(() {
+                                          isWorking = false;
+                                          isError = true;
+                                          statusMsg = '$e';
+                                        });
+                                      }
+                                    },
+                              child: const Text('Exchange'),
+                            ),
+                          ],
+                        ),
+                        const SizedBox(height: 8),
+                      ],
+                    ),
+                    const Divider(height: 20),
+                    Wrap(
+                      spacing: 10,
+                      runSpacing: 8,
+                      children: [
+                        OutlinedButton.icon(
+                          icon: const Icon(Icons.create_new_folder_outlined, size: 16),
+                          label: const Text('Verify / Create /App/Mjolnir'),
+                          onPressed: isWorking
+                              ? null
+                              : () async {
+                                  setDialogState(() {
+                                    isWorking = true;
+                                    statusMsg = 'Checking ${folderController.text.trim()} on Dropbox...';
+                                    isError = false;
+                                  });
+                                  try {
+                                    await saveSettings();
+                                    await dropbox.ensureDirectoryExists();
+                                    final files = await dropbox.listJsonFiles();
+                                    setDialogState(() {
+                                      isWorking = false;
+                                      isError = false;
+                                      statusMsg =
+                                          'Connected! ${dropbox.normalizedFolderPath} is ready (${files.length} JSON file(s) found).';
+                                    });
+                                  } catch (e) {
+                                    setDialogState(() {
+                                      isWorking = false;
+                                      isError = true;
+                                      statusMsg = '$e';
+                                    });
+                                  }
+                                },
+                        ),
+                        if (_vaultManager.isUnlocked) ...[
+                          ElevatedButton.icon(
+                            icon: const Icon(Icons.cloud_upload_outlined, size: 16),
+                            label: const Text('Export to Dropbox'),
+                            onPressed: isWorking
+                                ? null
+                                : () async {
+                                    setDialogState(() {
+                                      isWorking = true;
+                                      statusMsg = 'Uploading JSON vault to Dropbox...';
+                                      isError = false;
+                                    });
+                                    try {
+                                      await saveSettings();
+                                      final dateStr = DateTime.now().toIso8601String().split('T').first;
+                                      final path = await _vaultManager.exportVaultToDropbox(
+                                        fileName: 'servers.json',
+                                      );
+                                      await _vaultManager.exportVaultToDropbox(
+                                        fileName: 'mjolnir-servers-$dateStr.json',
+                                      );
+                                      setDialogState(() {
+                                        isWorking = false;
+                                        isError = false;
+                                        statusMsg = 'Exported to $path on Dropbox!';
+                                      });
+                                    } catch (e) {
+                                      setDialogState(() {
+                                        isWorking = false;
+                                        isError = true;
+                                        statusMsg = '$e';
+                                      });
+                                    }
+                                  },
+                          ),
+                          ElevatedButton.icon(
+                            icon: const Icon(Icons.cloud_download_outlined, size: 16),
+                            label: const Text('Import Newest from Dropbox'),
+                            onPressed: isWorking
+                                ? null
+                                : () async {
+                                    await saveSettings();
+                                    if (ctx.mounted) Navigator.of(ctx).pop();
+                                    await _importFromDropbox();
+                                  },
+                          ),
+                        ] else ...[
+                          ElevatedButton.icon(
+                            icon: const Icon(Icons.cloud_download_outlined, size: 16),
+                            label: const Text('Load Newest Vault from Dropbox Now'),
+                            onPressed: isWorking
+                                ? null
+                                : () async {
+                                    setDialogState(() {
+                                      isWorking = true;
+                                      statusMsg = 'Checking Dropbox for newest vault...';
+                                      isError = false;
+                                    });
+                                    try {
+                                      await saveSettings();
+                                      final loadedPath =
+                                          await _vaultManager.checkAndLoadNewestFromDropbox();
+                                      if (mounted) setState(() {});
+                                      setDialogState(() {
+                                        isWorking = false;
+                                        isError = false;
+                                        statusMsg = loadedPath != null
+                                            ? 'Loaded newest vault from $loadedPath! Enter Master Password to unlock.'
+                                            : 'Local vault is already up-to-date (or no newer file in Dropbox).';
+                                      });
+                                    } catch (e) {
+                                      setDialogState(() {
+                                        isWorking = false;
+                                        isError = true;
+                                        statusMsg = '$e';
+                                      });
+                                    }
+                                  },
+                          ),
+                        ],
+                      ],
+                    ),
+                    if (statusMsg != null) ...[
+                      const SizedBox(height: 12),
+                      Container(
+                        width: double.infinity,
+                        padding: const EdgeInsets.all(10),
+                        decoration: BoxDecoration(
+                          color: isError
+                              ? Colors.redAccent.withAlpha(30)
+                              : Colors.greenAccent.withAlpha(25),
+                          borderRadius: BorderRadius.circular(6),
+                          border: Border.all(
+                            color: isError ? Colors.redAccent : Colors.greenAccent.withAlpha(120),
+                          ),
+                        ),
+                        child: Text(
+                          statusMsg!,
+                          style: TextStyle(
+                            fontSize: 12,
+                            color: isError ? Colors.redAccent : Colors.greenAccent,
+                          ),
+                        ),
+                      ),
+                    ],
+                  ],
+                ),
+              ),
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.of(ctx).pop(),
+                child: const Text('Close'),
+              ),
+              ElevatedButton(
+                onPressed: isWorking
+                    ? null
+                    : () async {
+                        await saveSettings();
+                        if (!_vaultManager.isUnlocked && autoSync && dropbox.config.isConfigured) {
+                          try {
+                            await _vaultManager.checkAndLoadNewestFromDropbox();
+                          } catch (_) {}
+                        }
+                        if (mounted) setState(() {});
+                        if (ctx.mounted) Navigator.of(ctx).pop();
+                      },
+                child: const Text('Save Settings'),
+              ),
+            ],
+          );
+        },
+      ),
+    );
+  }
+
   Future<void> _importVault() async {
     try {
       final result = await FilePicker.pickFiles(
@@ -610,15 +1071,72 @@ class _MainScreenState extends State<MainScreen> {
               ),
               onPressed: _openTaskManagerTab,
             ),
-            IconButton(
+            PopupMenuButton<String>(
               icon: const Icon(Icons.file_upload_outlined, size: 20),
               tooltip: 'Import JSON Connections',
-              onPressed: _importVault,
+              onSelected: (val) {
+                if (val == 'local') _importVault();
+                if (val == 'dropbox') _importFromDropbox();
+              },
+              itemBuilder: (ctx) => [
+                const PopupMenuItem(
+                  value: 'local',
+                  child: ListTile(
+                    dense: true,
+                    contentPadding: EdgeInsets.zero,
+                    leading: Icon(Icons.folder_open, size: 18),
+                    title: Text('Import from Local JSON File'),
+                  ),
+                ),
+                const PopupMenuItem(
+                  value: 'dropbox',
+                  child: ListTile(
+                    dense: true,
+                    contentPadding: EdgeInsets.zero,
+                    leading: Icon(Icons.cloud_download_outlined, size: 18, color: Colors.amberAccent),
+                    title: Text('Import Newest from Dropbox (/App/Mjolnir)'),
+                  ),
+                ),
+              ],
             ),
-            IconButton(
+            PopupMenuButton<String>(
               icon: const Icon(Icons.file_download_outlined, size: 20),
               tooltip: 'Export JSON Connections',
-              onPressed: _exportVault,
+              onSelected: (val) {
+                if (val == 'local') _exportVault();
+                if (val == 'dropbox') _exportToDropbox();
+              },
+              itemBuilder: (ctx) => [
+                const PopupMenuItem(
+                  value: 'local',
+                  child: ListTile(
+                    dense: true,
+                    contentPadding: EdgeInsets.zero,
+                    leading: Icon(Icons.save_alt, size: 18),
+                    title: Text('Export to Local JSON File'),
+                  ),
+                ),
+                const PopupMenuItem(
+                  value: 'dropbox',
+                  child: ListTile(
+                    dense: true,
+                    contentPadding: EdgeInsets.zero,
+                    leading: Icon(Icons.cloud_upload_outlined, size: 18, color: Colors.amberAccent),
+                    title: Text('Export to Dropbox (/App/Mjolnir)'),
+                  ),
+                ),
+              ],
+            ),
+            IconButton(
+              icon: Icon(
+                Icons.cloud_sync_outlined,
+                size: 20,
+                color: _vaultManager.dropboxService.config.isConfigured
+                    ? Colors.greenAccent
+                    : null,
+              ),
+              tooltip: 'Dropbox API Settings & Sync (/App/Mjolnir)',
+              onPressed: _showDropboxDialog,
             ),
             IconButton(
               icon: const Icon(Icons.add, size: 20),
@@ -726,6 +1244,32 @@ class _MainScreenState extends State<MainScreen> {
                       : const Text('Unlock'),
                 ),
               ),
+              const SizedBox(height: 12),
+              TextButton.icon(
+                icon: Icon(
+                  Icons.cloud_sync_outlined,
+                  size: 16,
+                  color: _vaultManager.dropboxService.config.isConfigured
+                      ? Colors.greenAccent
+                      : Colors.amberAccent,
+                ),
+                label: Text(
+                  _vaultManager.dropboxService.config.isConfigured
+                      ? 'Dropbox API Connected (${_vaultManager.dropboxService.normalizedFolderPath})'
+                      : 'Configure Dropbox API (/App/Mjolnir)',
+                  style: const TextStyle(fontSize: 12),
+                ),
+                onPressed: _showDropboxDialog,
+              ),
+              if (_vaultManager.loadedSource.startsWith('Dropbox'))
+                Padding(
+                  padding: const EdgeInsets.only(top: 4),
+                  child: Text(
+                    'Loaded newest vault from ${_vaultManager.loadedSource}',
+                    style: const TextStyle(fontSize: 11, color: Colors.greenAccent),
+                    textAlign: TextAlign.center,
+                  ),
+                ),
             ],
           ),
         ),

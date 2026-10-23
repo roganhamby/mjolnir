@@ -5,34 +5,87 @@ import '../models/server_config.dart';
 import '../models/task_item.dart';
 import '../models/sync_vault_file.dart';
 import 'crypto_vault_service.dart';
+import 'dropbox_sync_service.dart';
 import 'sync_storage_provider.dart';
 
 class VaultManager with ChangeNotifier {
   final CryptoVaultService cryptoService = CryptoVaultService();
   final SyncStorageProvider storageProvider;
+  final DropboxSyncService dropboxService;
 
   SyncVaultFile? _vault;
   SecretKey? _masterKey;
   bool _isUnlocked = false;
   String? _errorMessage;
+  String _loadedSource = 'Local';
 
-  VaultManager({required this.storageProvider});
+  VaultManager({
+    required this.storageProvider,
+    DropboxSyncService? dropboxService,
+  }) : dropboxService = dropboxService ?? DropboxSyncService();
 
   bool get isUnlocked => _isUnlocked;
   SyncVaultFile? get vault => _vault;
   List<ServerConfig> get servers => _vault?.servers ?? [];
   List<TaskItem> get tasks => _vault?.tasks ?? [];
   String? get errorMessage => _errorMessage;
+  String get loadedSource => _loadedSource;
 
-  /// Loads the vault metadata from storage. Unlocked state is false initially.
+  /// Loads the vault metadata from storage and checks Dropbox (/App/Mjolnir) if configured,
+  /// automatically selecting the newest vault when loading.
   Future<void> init() async {
     try {
-      _vault = await storageProvider.loadVault();
+      await dropboxService.loadConfig();
+      final localExisted = await storageProvider.vaultExists();
+      var activeVault = await storageProvider.loadVault();
+      _loadedSource = 'Local';
+
+      if (dropboxService.config.isConfigured &&
+          dropboxService.config.autoSyncOnLoadAndSave) {
+        try {
+          final remoteNewest = await dropboxService.fetchNewestVaultFromDropbox();
+          if (remoteNewest != null) {
+            final localHasData = localExisted &&
+                (activeVault.servers.isNotEmpty || activeVault.tasks.isNotEmpty);
+            if (SyncVaultFile.isNewerVault(
+              remoteNewest.vault,
+              activeVault,
+              candidateModifiedAt: remoteNewest.modifiedAt,
+              baselineExistedOnDisk: localHasData,
+            )) {
+              activeVault = remoteNewest.vault;
+              await storageProvider.saveVault(activeVault);
+              _loadedSource = 'Dropbox (${remoteNewest.filePath})';
+            }
+          }
+        } catch (dropboxErr) {
+          debugPrint('Dropbox load check failed (using local vault): $dropboxErr');
+        }
+      }
+
+      _vault = activeVault;
       _errorMessage = null;
       notifyListeners();
     } catch (e) {
       _errorMessage = 'Failed to load vault file: $e';
       notifyListeners();
+    }
+  }
+
+  /// Saves the vault locally and, if Dropbox auto-sync is enabled, uploads to `/App/Mjolnir/servers.json`.
+  Future<void> _persistVault() async {
+    if (_vault == null) return;
+    await storageProvider.saveVault(_vault!);
+    if (dropboxService.config.isConfigured &&
+        dropboxService.config.autoSyncOnLoadAndSave) {
+      try {
+        await dropboxService.uploadVaultJson(
+          _vault!.toFormattedJson(),
+          fileName: 'servers.json',
+        );
+      } catch (e) {
+        debugPrint('Dropbox auto-sync upload failed: $e');
+      }
     }
   }
 
@@ -99,7 +152,7 @@ class VaultManager with ChangeNotifier {
     }
 
     _vault!.updatedAt = DateTime.now().toUtc();
-    await storageProvider.saveVault(_vault!);
+    await _persistVault();
     notifyListeners();
   }
 
@@ -150,7 +203,7 @@ class VaultManager with ChangeNotifier {
     }
 
     _vault!.updatedAt = DateTime.now().toUtc();
-    await storageProvider.saveVault(_vault!);
+    await _persistVault();
     notifyListeners();
     return count;
   }
@@ -163,7 +216,7 @@ class VaultManager with ChangeNotifier {
 
     _vault!.servers.removeWhere((s) => s.id == serverId);
     _vault!.updatedAt = DateTime.now().toUtc();
-    await storageProvider.saveVault(_vault!);
+    await _persistVault();
     notifyListeners();
   }
 
@@ -182,7 +235,7 @@ class VaultManager with ChangeNotifier {
     }
 
     _vault!.updatedAt = DateTime.now().toUtc();
-    await storageProvider.saveVault(_vault!);
+    await _persistVault();
     notifyListeners();
   }
 
@@ -194,7 +247,7 @@ class VaultManager with ChangeNotifier {
 
     _vault!.tasks.removeWhere((t) => t.id == taskId);
     _vault!.updatedAt = DateTime.now().toUtc();
-    await storageProvider.saveVault(_vault!);
+    await _persistVault();
     notifyListeners();
   }
 
@@ -204,5 +257,74 @@ class VaultManager with ChangeNotifier {
       throw StateError('Vault not loaded.');
     }
     return _vault!.toFormattedJson();
+  }
+
+  /// Exports the current vault JSON directly to Dropbox in `/App/Mjolnir`.
+  Future<String> exportVaultToDropbox({String? fileName}) async {
+    if (_vault == null) {
+      throw StateError('Vault not loaded.');
+    }
+    _vault!.updatedAt = DateTime.now().toUtc();
+    await storageProvider.saveVault(_vault!);
+    final jsonString = _vault!.toFormattedJson();
+    final targetName = (fileName != null && fileName.trim().isNotEmpty)
+        ? fileName.trim()
+        : 'servers.json';
+    return await dropboxService.uploadVaultJson(
+      jsonString,
+      fileName: targetName,
+    );
+  }
+
+  /// Imports the newest JSON vault found in Dropbox's `/App/Mjolnir` directory.
+  /// If unlocked, merges servers and tasks by `updatedAt` timestamps and persists.
+  Future<({int serverCount, String filePath})> importNewestFromDropbox(
+    String masterPassword,
+  ) async {
+    final newest = await dropboxService.fetchNewestVaultFromDropbox();
+    if (newest == null) {
+      throw Exception(
+        'No JSON vault files found in Dropbox directory ${dropboxService.normalizedFolderPath}.',
+      );
+    }
+
+    if (!_isUnlocked) {
+      // When locked, replace local vault if Dropbox is newer (or force adopt it) and unlock
+      _vault = newest.vault;
+      await storageProvider.saveVault(_vault!);
+      _loadedSource = 'Dropbox (${newest.filePath})';
+      final ok = await unlock(masterPassword);
+      if (!ok) {
+        throw Exception(_errorMessage ?? 'Invalid master password for Dropbox vault.');
+      }
+      return (serverCount: _vault!.servers.length, filePath: newest.filePath);
+    }
+
+    final count = await importVaultJson(newest.rawJson, masterPassword);
+    _loadedSource = 'Dropbox (${newest.filePath})';
+    return (serverCount: count, filePath: newest.filePath);
+  }
+
+  /// Checks Dropbox for a newer vault while on the lock screen and loads it if newer.
+  Future<String?> checkAndLoadNewestFromDropbox() async {
+    final newest = await dropboxService.fetchNewestVaultFromDropbox();
+    if (newest == null) return null;
+
+    final localHasData = _vault != null &&
+        (_vault!.servers.isNotEmpty || _vault!.tasks.isNotEmpty);
+    if (_vault == null ||
+        SyncVaultFile.isNewerVault(
+          newest.vault,
+          _vault!,
+          candidateModifiedAt: newest.modifiedAt,
+          baselineExistedOnDisk: localHasData,
+        )) {
+      _vault = newest.vault;
+      await storageProvider.saveVault(_vault!);
+      _loadedSource = 'Dropbox (${newest.filePath})';
+      notifyListeners();
+      return newest.filePath;
+    }
+    return null;
   }
 }

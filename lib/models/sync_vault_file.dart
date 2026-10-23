@@ -70,7 +70,7 @@ class SyncVaultFile {
     return const JsonEncoder.withIndent('  ').convert(toJson());
   }
 
-  /// Merges remote servers with current servers based on per-server updatedAt timestamps.
+  /// Merges remote servers and tasks with current vault based on per-item updatedAt timestamps.
   void mergeWith(SyncVaultFile remoteVault) {
     final Map<String, ServerConfig> currentMap = {
       for (var s in servers) s.id: s,
@@ -90,6 +90,41 @@ class SyncVaultFile {
       }
     }
 
+    final Map<String, TaskItem> currentTaskMap = {
+      for (var t in tasks) t.id: t,
+    };
+
+    for (final remoteTask in remoteVault.tasks) {
+      if (!currentTaskMap.containsKey(remoteTask.id)) {
+        tasks.add(remoteTask);
+      } else {
+        final localTask = currentTaskMap[remoteTask.id]!;
+        if (remoteTask.updatedAt.isAfter(localTask.updatedAt)) {
+          remoteTask.assignedTabId = localTask.assignedTabId;
+          final index = tasks.indexOf(localTask);
+          tasks[index] = remoteTask;
+        }
+      }
+    }
+
     updatedAt = DateTime.now().toUtc();
+  }
+
+  /// Returns true if [candidate] should be considered newer than [baseline] when loading.
+  static bool isNewerVault(
+    SyncVaultFile candidate,
+    SyncVaultFile baseline, {
+    DateTime? candidateModifiedAt,
+    bool baselineExistedOnDisk = true,
+  }) {
+    if (!baselineExistedOnDisk &&
+        (candidate.servers.isNotEmpty || candidate.tasks.isNotEmpty)) {
+      return true;
+    }
+    final effectiveCandidateTime = candidateModifiedAt != null &&
+            candidateModifiedAt.isAfter(candidate.updatedAt)
+        ? candidateModifiedAt
+        : candidate.updatedAt;
+    return effectiveCandidateTime.isAfter(baseline.updatedAt);
   }
 }

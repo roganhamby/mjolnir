@@ -3,6 +3,55 @@ import 'package:mjolnir/models/server_config.dart';
 import 'package:mjolnir/models/task_item.dart';
 import 'package:mjolnir/models/sync_vault_file.dart';
 import 'package:mjolnir/services/crypto_vault_service.dart';
+import 'package:mjolnir/services/dropbox_sync_service.dart';
+import 'package:mjolnir/services/sync_storage_provider.dart';
+import 'package:mjolnir/services/vault_manager.dart';
+
+class _InMemoryStorageProvider implements SyncStorageProvider {
+  SyncVaultFile? stored;
+  bool existedOnDisk;
+
+  _InMemoryStorageProvider({this.stored, this.existedOnDisk = true});
+
+  @override
+  Future<String> getProviderName() async => 'Memory';
+
+  @override
+  Future<bool> vaultExists() async => existedOnDisk;
+
+  @override
+  Future<SyncVaultFile> loadVault() async {
+    stored ??= SyncVaultFile.createEmpty();
+    return stored!;
+  }
+
+  @override
+  Future<void> saveVault(SyncVaultFile vault) async {
+    stored = vault;
+    existedOnDisk = true;
+  }
+}
+
+class _FakeDropboxSyncService extends DropboxSyncService {
+  final ({SyncVaultFile vault, String rawJson, String filePath, DateTime modifiedAt})? remoteResult;
+  DropboxConfig fakeConfig;
+
+  _FakeDropboxSyncService({
+    required this.remoteResult,
+    DropboxConfig? config,
+  }) : fakeConfig = config ?? DropboxConfig(accessToken: 'fake-token', folderPath: '/App/Mjolnir');
+
+  @override
+  DropboxConfig get config => fakeConfig;
+
+  @override
+  Future<void> loadConfig() async {}
+
+  @override
+  Future<({SyncVaultFile vault, String rawJson, String filePath, DateTime modifiedAt})?> fetchNewestVaultFromDropbox() async {
+    return remoteResult;
+  }
+}
 
 void main() {
   group('CryptoVaultService & Envelope Encryption Tests', () {
@@ -159,6 +208,59 @@ void main() {
       expect(restored.tasks.length, equals(2));
       expect(restored.tasks.first.importance, equals(TaskImportance.priority));
       expect(restored.tasks.first.title, equals('Rotate SSH keys'));
+    });
+
+    test('VaultManager uses the newest vault between Local and Dropbox (/App/Mjolnir) on load', () async {
+      final olderLocalVault = SyncVaultFile(
+        salt: salt,
+        updatedAt: DateTime.utc(2026, 5, 1, 10, 0),
+        servers: [
+          ServerConfig(
+            id: 'srv-old',
+            name: 'Old Local Server',
+            host: '10.0.0.1',
+            username: 'root',
+          ),
+        ],
+      );
+
+      final newerDropboxVault = SyncVaultFile(
+        salt: salt,
+        updatedAt: DateTime.utc(2026, 5, 2, 14, 30),
+        servers: [
+          ServerConfig(
+            id: 'srv-new',
+            name: 'New Dropbox Server',
+            host: '10.0.0.2',
+            username: 'ubuntu',
+          ),
+        ],
+      );
+
+      final storage = _InMemoryStorageProvider(
+        stored: olderLocalVault,
+        existedOnDisk: true,
+      );
+      final dropbox = _FakeDropboxSyncService(
+        remoteResult: (
+          vault: newerDropboxVault,
+          rawJson: newerDropboxVault.toFormattedJson(),
+          filePath: '/App/Mjolnir/servers.json',
+          modifiedAt: newerDropboxVault.updatedAt,
+        ),
+      );
+
+      expect(dropbox.normalizedFolderPath, equals('/App/Mjolnir'));
+
+      final manager = VaultManager(
+        storageProvider: storage,
+        dropboxService: dropbox,
+      );
+      await manager.init();
+
+      expect(manager.servers.length, equals(1));
+      expect(manager.servers.first.name, equals('New Dropbox Server'));
+      expect(manager.loadedSource, contains('Dropbox (/App/Mjolnir/servers.json)'));
     });
   });
 }
