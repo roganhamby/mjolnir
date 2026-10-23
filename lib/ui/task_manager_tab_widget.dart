@@ -651,13 +651,161 @@ class _TaskManagerTabWidgetState extends State<TaskManagerTabWidget> {
               : ListView.separated(
                   padding: const EdgeInsets.all(12),
                   itemCount: sortedTasks.length,
-                  separatorBuilder: (_, __) => const SizedBox(height: 6),
+                  separatorBuilder: (context, index) => const SizedBox(height: 6),
                   itemBuilder: (context, index) {
                     final task = sortedTasks[index];
                     final isOverdue = task.isOverdue;
                     final assignedTab = widget.availableTabs
                         .where((t) => t.id == task.assignedTabId)
                         .firstOrNull;
+
+                    final importanceBadge = Container(
+                      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+                      decoration: BoxDecoration(
+                        color: task.importance.color.withAlpha(30),
+                        borderRadius: BorderRadius.circular(6),
+                        border: Border.all(color: task.importance.color.withAlpha(100)),
+                      ),
+                      child: DropdownButtonHideUnderline(
+                        child: DropdownButton<TaskImportance>(
+                          value: task.importance,
+                          isDense: true,
+                          dropdownColor: const Color(0xFF2D2D2D),
+                          items: TaskImportance.values.map((imp) {
+                            return DropdownMenuItem(
+                              value: imp,
+                              child: Row(
+                                mainAxisSize: MainAxisSize.min,
+                                children: [
+                                  Icon(imp.icon, size: 14, color: imp.color),
+                                  const SizedBox(width: 4),
+                                  Text(
+                                    imp.label,
+                                    style: TextStyle(
+                                      fontSize: 11,
+                                      fontWeight: FontWeight.bold,
+                                      color: imp.color,
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            );
+                          }).toList(),
+                          onChanged: (val) {
+                            if (val != null) {
+                              task.importance = val;
+                              widget.onSaveTask(task);
+                            }
+                          },
+                        ),
+                      ),
+                    );
+
+                    final dueDateBadge = InkWell(
+                      onTap: () async {
+                        final picked = await _pickDateTime(context, task.dueDate);
+                        if (picked != null && mounted) {
+                          task.dueDate = picked;
+                          await widget.onSaveTask(task);
+                        }
+                      },
+                      borderRadius: BorderRadius.circular(6),
+                      child: Container(
+                        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                        decoration: BoxDecoration(
+                          color: isOverdue
+                              ? Colors.redAccent.withAlpha(40)
+                              : const Color(0xFF1E1E1E),
+                          borderRadius: BorderRadius.circular(6),
+                          border: Border.all(
+                            color: isOverdue
+                                ? Colors.redAccent
+                                : Colors.grey.shade800,
+                          ),
+                        ),
+                        child: Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            Icon(
+                              isOverdue ? Icons.error_outline : Icons.schedule,
+                              size: 14,
+                              color: isOverdue ? Colors.redAccent : Colors.grey.shade400,
+                            ),
+                            const SizedBox(width: 5),
+                            Text(
+                              task.dueDate != null
+                                  ? DateFormat('MMM d, yyyy HH:mm').format(task.dueDate!.toLocal())
+                                  : 'Set Due Date',
+                              style: TextStyle(
+                                fontSize: 12,
+                                fontWeight: isOverdue ? FontWeight.bold : FontWeight.normal,
+                                color: isOverdue
+                                    ? Colors.redAccent
+                                    : (task.dueDate != null ? Colors.grey.shade200 : Colors.grey),
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                    );
+
+                    final tabAssignmentBadge = Container(
+                      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+                      decoration: BoxDecoration(
+                        color: const Color(0xFF1E1E1E),
+                        borderRadius: BorderRadius.circular(6),
+                        border: Border.all(
+                          color: assignedTab != null
+                              ? Colors.amberAccent.withAlpha(120)
+                              : Colors.grey.shade800,
+                        ),
+                      ),
+                      child: DropdownButtonHideUnderline(
+                        child: DropdownButton<String?>(
+                          value: assignedTab?.id,
+                          hint: const Text(
+                            'Assign Tab',
+                            style: TextStyle(fontSize: 11, color: Colors.grey),
+                          ),
+                          isDense: true,
+                          dropdownColor: const Color(0xFF2D2D2D),
+                          items: [
+                            const DropdownMenuItem<String?>(
+                              value: null,
+                              child: Text(
+                                'Unassigned',
+                                style: TextStyle(fontSize: 11, color: Colors.grey),
+                              ),
+                            ),
+                            ...widget.availableTabs.map((tab) {
+                              return DropdownMenuItem<String?>(
+                                value: tab.id,
+                                child: Row(
+                                  mainAxisSize: MainAxisSize.min,
+                                  children: [
+                                    Icon(
+                                      tab.type == 'sftp'
+                                          ? Icons.folder_shared
+                                          : Icons.terminal,
+                                      size: 13,
+                                      color: Colors.amberAccent,
+                                    ),
+                                    const SizedBox(width: 5),
+                                    Text(
+                                      tab.title,
+                                      style: const TextStyle(fontSize: 11, color: Colors.white),
+                                    ),
+                                  ],
+                                ),
+                              );
+                            }),
+                          ],
+                          onChanged: (tabId) {
+                            widget.onAssignTaskToTab(task, tabId);
+                          },
+                        ),
+                      ),
+                    );
 
                     return Container(
                       padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
@@ -670,191 +818,90 @@ class _TaskManagerTabWidgetState extends State<TaskManagerTabWidget> {
                               : const Color(0xFF383838),
                         ),
                       ),
-                      child: Row(
-                        children: [
-                          // Immediate completion checkbox
-                          Tooltip(
-                            message: 'Mark done (immediately removes task)',
-                            child: Checkbox(
-                              value: false,
-                              onChanged: (_) => widget.onCompleteTask(task.id),
-                            ),
-                          ),
-                          const SizedBox(width: 6),
-
-                          // Importance Dropdown Badge
-                          Container(
-                            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
-                            decoration: BoxDecoration(
-                              color: task.importance.color.withAlpha(30),
-                              borderRadius: BorderRadius.circular(6),
-                              border: Border.all(color: task.importance.color.withAlpha(100)),
-                            ),
-                            child: DropdownButtonHideUnderline(
-                              child: DropdownButton<TaskImportance>(
-                                value: task.importance,
-                                isDense: true,
-                                dropdownColor: const Color(0xFF2D2D2D),
-                                items: TaskImportance.values.map((imp) {
-                                  return DropdownMenuItem(
-                                    value: imp,
-                                    child: Row(
-                                      mainAxisSize: MainAxisSize.min,
-                                      children: [
-                                        Icon(imp.icon, size: 14, color: imp.color),
-                                        const SizedBox(width: 4),
-                                        Text(
-                                          imp.label,
-                                          style: TextStyle(
-                                            fontSize: 11,
-                                            fontWeight: FontWeight.bold,
-                                            color: imp.color,
-                                          ),
-                                        ),
-                                      ],
-                                    ),
-                                  );
-                                }).toList(),
-                                onChanged: (val) {
-                                  if (val != null) {
-                                    task.importance = val;
-                                    widget.onSaveTask(task);
-                                  }
-                                },
-                              ),
-                            ),
-                          ),
-                          const SizedBox(width: 12),
-
-                          // Task Title
-                          Expanded(
-                            child: Text(
-                              task.title,
-                              style: const TextStyle(
-                                fontSize: 14,
-                                fontWeight: FontWeight.w500,
-                                color: Colors.white,
-                              ),
-                            ),
-                          ),
-
-                          // Due Date Badge (turns red when passed)
-                          InkWell(
-                            onTap: () async {
-                              final picked = await _pickDateTime(context, task.dueDate);
-                              if (picked != null && mounted) {
-                                task.dueDate = picked;
-                                await widget.onSaveTask(task);
-                              }
-                            },
-                            borderRadius: BorderRadius.circular(6),
-                            child: Container(
-                              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-                              decoration: BoxDecoration(
-                                color: isOverdue
-                                    ? Colors.redAccent.withAlpha(40)
-                                    : const Color(0xFF1E1E1E),
-                                borderRadius: BorderRadius.circular(6),
-                                border: Border.all(
-                                  color: isOverdue
-                                      ? Colors.redAccent
-                                      : Colors.grey.shade800,
-                                ),
-                              ),
-                              child: Row(
-                                mainAxisSize: MainAxisSize.min,
-                                children: [
-                                  Icon(
-                                    isOverdue ? Icons.error_outline : Icons.schedule,
-                                    size: 14,
-                                    color: isOverdue ? Colors.redAccent : Colors.grey.shade400,
-                                  ),
-                                  const SizedBox(width: 5),
-                                  Text(
-                                    task.dueDate != null
-                                        ? DateFormat('MMM d, yyyy HH:mm').format(task.dueDate!.toLocal())
-                                        : 'Set Due Date',
-                                    style: TextStyle(
-                                      fontSize: 12,
-                                      fontWeight: isOverdue ? FontWeight.bold : FontWeight.normal,
-                                      color: isOverdue
-                                          ? Colors.redAccent
-                                          : (task.dueDate != null ? Colors.grey.shade200 : Colors.grey),
-                                    ),
-                                  ),
-                                ],
-                              ),
-                            ),
-                          ),
-                          const SizedBox(width: 10),
-
-                          // Tab Assignment Dropdown
-                          Container(
-                            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
-                            decoration: BoxDecoration(
-                              color: const Color(0xFF1E1E1E),
-                              borderRadius: BorderRadius.circular(6),
-                              border: Border.all(
-                                color: assignedTab != null
-                                    ? Colors.amberAccent.withAlpha(120)
-                                    : Colors.grey.shade800,
-                              ),
-                            ),
-                            child: DropdownButtonHideUnderline(
-                              child: DropdownButton<String?>(
-                                value: assignedTab?.id,
-                                hint: const Text(
-                                  'Assign Tab',
-                                  style: TextStyle(fontSize: 11, color: Colors.grey),
-                                ),
-                                isDense: true,
-                                dropdownColor: const Color(0xFF2D2D2D),
-                                items: [
-                                  const DropdownMenuItem<String?>(
-                                    value: null,
-                                    child: Text(
-                                      'Unassigned',
-                                      style: TextStyle(fontSize: 11, color: Colors.grey),
-                                    ),
-                                  ),
-                                  ...widget.availableTabs.map((tab) {
-                                    return DropdownMenuItem<String?>(
-                                      value: tab.id,
-                                      child: Row(
-                                        mainAxisSize: MainAxisSize.min,
-                                        children: [
-                                          Icon(
-                                            tab.type == 'sftp'
-                                                ? Icons.folder_shared
-                                                : Icons.terminal,
-                                            size: 13,
-                                            color: Colors.amberAccent,
-                                          ),
-                                          const SizedBox(width: 5),
-                                          Text(
-                                            tab.title,
-                                            style: const TextStyle(fontSize: 11, color: Colors.white),
-                                          ),
-                                        ],
+                      child: LayoutBuilder(
+                        builder: (context, constraints) {
+                          if (constraints.maxWidth < 580) {
+                            return Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                Row(
+                                  children: [
+                                    Tooltip(
+                                      message: 'Mark done (immediately removes task)',
+                                      child: Checkbox(
+                                        value: false,
+                                        onChanged: (_) => widget.onCompleteTask(task.id),
                                       ),
-                                    );
-                                  }),
-                                ],
-                                onChanged: (tabId) {
-                                  widget.onAssignTaskToTab(task, tabId);
-                                },
-                              ),
-                            ),
-                          ),
-                          const SizedBox(width: 6),
+                                    ),
+                                    const SizedBox(width: 4),
+                                    Expanded(
+                                      child: Text(
+                                        task.title,
+                                        style: const TextStyle(
+                                          fontSize: 14,
+                                          fontWeight: FontWeight.w500,
+                                          color: Colors.white,
+                                        ),
+                                      ),
+                                    ),
+                                    IconButton(
+                                      icon: const Icon(Icons.edit_outlined, size: 16, color: Colors.grey),
+                                      tooltip: 'Edit Task',
+                                      onPressed: () => _showEditTaskDialog(task),
+                                    ),
+                                  ],
+                                ),
+                                Padding(
+                                  padding: const EdgeInsets.only(left: 12, top: 4),
+                                  child: Wrap(
+                                    spacing: 8,
+                                    runSpacing: 6,
+                                    crossAxisAlignment: WrapCrossAlignment.center,
+                                    children: [
+                                      importanceBadge,
+                                      dueDateBadge,
+                                      tabAssignmentBadge,
+                                    ],
+                                  ),
+                                ),
+                              ],
+                            );
+                          }
 
-                          // Edit button
-                          IconButton(
-                            icon: const Icon(Icons.edit_outlined, size: 16, color: Colors.grey),
-                            tooltip: 'Edit Task',
-                            onPressed: () => _showEditTaskDialog(task),
-                          ),
-                        ],
+                          return Row(
+                            children: [
+                              Tooltip(
+                                message: 'Mark done (immediately removes task)',
+                                child: Checkbox(
+                                  value: false,
+                                  onChanged: (_) => widget.onCompleteTask(task.id),
+                                ),
+                              ),
+                              const SizedBox(width: 6),
+                              importanceBadge,
+                              const SizedBox(width: 12),
+                              Expanded(
+                                child: Text(
+                                  task.title,
+                                  style: const TextStyle(
+                                    fontSize: 14,
+                                    fontWeight: FontWeight.w500,
+                                    color: Colors.white,
+                                  ),
+                                ),
+                              ),
+                              dueDateBadge,
+                              const SizedBox(width: 10),
+                              tabAssignmentBadge,
+                              const SizedBox(width: 6),
+                              IconButton(
+                                icon: const Icon(Icons.edit_outlined, size: 16, color: Colors.grey),
+                                tooltip: 'Edit Task',
+                                onPressed: () => _showEditTaskDialog(task),
+                              ),
+                            ],
+                          );
+                        },
                       ),
                     );
                   },

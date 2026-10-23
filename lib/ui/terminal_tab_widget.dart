@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:intl/intl.dart';
 import 'package:path/path.dart' as p;
+import 'package:path_provider/path_provider.dart';
 import 'package:xterm/xterm.dart';
 import '../models/server_config.dart';
 import '../models/task_item.dart';
@@ -63,6 +64,7 @@ class _TerminalTabWidgetState extends State<TerminalTabWidget> {
   String? _screenLogPath;
   IOSink? _screenLogSink;
   int _screenLogBytesWritten = 0;
+  bool _ctrlModifierActive = false;
   final RegExp _ansiRegex = RegExp(r'\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])');
 
   static TerminalTargetPlatform _getTerminalPlatform() {
@@ -364,15 +366,30 @@ Started: ${DateTime.now().toLocal().toString()}
 ================================================================================
 ''';
 
-    final savedUri = await FilePicker.saveFile(
-      dialogTitle: 'Save Screen Log As',
-      fileName: fileName,
-      bytes: Uint8List.fromList(utf8.encode(header)),
-    );
+    String selectedPath;
+    final isMobile = Platform.isAndroid || Platform.isIOS;
 
-    if (savedUri == null || !mounted) return;
+    if (isMobile) {
+      // On Android/iOS, FilePicker.saveFile returns a one-shot SAF content:// URI that cannot
+      // be opened with File(...).openWrite(mode: FileMode.append). Stream to app documents first,
+      // then offer to export when logging stops.
+      final docDir = await getApplicationDocumentsDirectory();
+      final logDir = Directory(p.join(docDir.path, 'Mjolnir', 'logs'));
+      if (!await logDir.exists()) {
+        await logDir.create(recursive: true);
+      }
+      selectedPath = p.join(logDir.path, fileName);
+      await File(selectedPath).writeAsString(header, flush: true);
+    } else {
+      final savedUri = await FilePicker.saveFile(
+        dialogTitle: 'Save Screen Log As',
+        fileName: fileName,
+        bytes: Uint8List.fromList(utf8.encode(header)),
+      );
 
-    final selectedPath = savedUri.toFilePath();
+      if (savedUri == null || !mounted) return;
+      selectedPath = savedUri.toFilePath();
+    }
 
     try {
       final file = File(selectedPath);
@@ -442,21 +459,36 @@ Total Characters Logged: $_screenLogBytesWritten
     });
 
     if (mounted && path != null) {
+      final isDesktop = Platform.isMacOS || Platform.isWindows || Platform.isLinux;
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
           content: Text('Screen log saved (${(_screenLogBytesWritten / 1024).toStringAsFixed(1)} KB): ${p.basename(path)}'),
-          action: SnackBarAction(
-            label: Platform.isMacOS ? 'Show in Finder' : 'Open Folder',
-            onPressed: () {
-              if (Platform.isMacOS) {
-                Process.run('open', ['-R', path]);
-              } else if (Platform.isWindows) {
-                Process.run('explorer.exe', ['/select,', path]);
-              } else if (Platform.isLinux) {
-                Process.run('xdg-open', [File(path).parent.path]);
-              }
-            },
-          ),
+          action: isDesktop
+              ? SnackBarAction(
+                  label: Platform.isMacOS ? 'Show in Finder' : 'Open Folder',
+                  onPressed: () {
+                    if (Platform.isMacOS) {
+                      Process.run('open', ['-R', path]);
+                    } else if (Platform.isWindows) {
+                      Process.run('explorer.exe', ['/select,$path']);
+                    } else if (Platform.isLinux) {
+                      Process.run('xdg-open', [File(path).parent.path]);
+                    }
+                  },
+                )
+              : SnackBarAction(
+                  label: 'Export Log',
+                  onPressed: () async {
+                    try {
+                      final bytes = await File(path).readAsBytes();
+                      await FilePicker.saveFile(
+                        dialogTitle: 'Save Screen Log As',
+                        fileName: p.basename(path),
+                        bytes: bytes,
+                      );
+                    } catch (_) {}
+                  },
+                ),
           duration: const Duration(seconds: 5),
         ),
       );
@@ -514,6 +546,18 @@ Total Characters Logged: $_screenLogBytesWritten
 
       // Terminal user input to SSH stdin
       terminal.onOutput = (data) {
+        if (_ctrlModifierActive && data.isNotEmpty) {
+          final code = data.toLowerCase().codeUnitAt(0);
+          setState(() => _ctrlModifierActive = false);
+          if (code >= 97 && code <= 122) {
+            // Convert 'a'..'z' to Ctrl+A..Ctrl+Z (1..26)
+            session.session.stdin.add(Uint8List.fromList([code - 96]));
+            if (data.length > 1) {
+              session.session.stdin.add(utf8.encode(data.substring(1)));
+            }
+            return;
+          }
+        }
         session.session.stdin.add(utf8.encode(data));
       };
 
@@ -555,8 +599,127 @@ Total Characters Logged: $_screenLogBytesWritten
     super.dispose();
   }
 
+  void _sendRawToShell(List<int> bytes) {
+    final session = _sshSession?.session;
+    if (session != null) {
+      session.stdin.add(Uint8List.fromList(bytes));
+    }
+    _requestTerminalFocus();
+  }
+
+  Widget _buildMobileAccessoryBar() {
+    Widget keyButton(
+      String label, {
+      required VoidCallback onTap,
+      bool highlighted = false,
+      IconData? icon,
+    }) {
+      return Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 3),
+        child: Material(
+          color: highlighted ? Colors.amberAccent : const Color(0xFF333333),
+          borderRadius: BorderRadius.circular(5),
+          child: InkWell(
+            onTap: onTap,
+            borderRadius: BorderRadius.circular(5),
+            child: Container(
+              constraints: const BoxConstraints(minWidth: 38, minHeight: 32),
+              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
+              alignment: Alignment.center,
+              child: icon != null
+                  ? Icon(
+                      icon,
+                      size: 16,
+                      color: highlighted ? Colors.black : Colors.white,
+                    )
+                  : Text(
+                      label,
+                      style: TextStyle(
+                        fontSize: 11,
+                        fontWeight: FontWeight.bold,
+                        color: highlighted ? Colors.black : Colors.white,
+                      ),
+                    ),
+            ),
+          ),
+        ),
+      );
+    }
+
+    return Container(
+      height: 42,
+      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 4),
+      decoration: const BoxDecoration(
+        color: Color(0xFF252526),
+        border: Border(top: BorderSide(color: Color(0xFF3C3C3C))),
+      ),
+      child: SingleChildScrollView(
+        scrollDirection: Axis.horizontal,
+        child: Row(
+          children: [
+            keyButton(
+              'ESC',
+              onTap: () => _sendRawToShell([0x1B]),
+            ),
+            keyButton(
+              'TAB',
+              onTap: () => _sendRawToShell([0x09]),
+            ),
+            keyButton(
+              'CTRL',
+              highlighted: _ctrlModifierActive,
+              onTap: () => setState(() => _ctrlModifierActive = !_ctrlModifierActive),
+            ),
+            keyButton(
+              'CTRL+C',
+              onTap: () => _sendRawToShell([0x03]),
+            ),
+            keyButton(
+              '↑',
+              onTap: () => terminal.keyInput(TerminalKey.arrowUp),
+            ),
+            keyButton(
+              '↓',
+              onTap: () => terminal.keyInput(TerminalKey.arrowDown),
+            ),
+            keyButton(
+              '←',
+              onTap: () => terminal.keyInput(TerminalKey.arrowLeft),
+            ),
+            keyButton(
+              '→',
+              onTap: () => terminal.keyInput(TerminalKey.arrowRight),
+            ),
+            keyButton(
+              '-',
+              onTap: () => _sendRawToShell(utf8.encode('-')),
+            ),
+            keyButton(
+              '/',
+              onTap: () => _sendRawToShell(utf8.encode('/')),
+            ),
+            keyButton(
+              '|',
+              onTap: () => _sendRawToShell(utf8.encode('|')),
+            ),
+            keyButton(
+              'KB',
+              icon: Icons.keyboard_alt_outlined,
+              onTap: () {
+                _terminalFocusNode.requestFocus();
+                SystemChannels.textInput.invokeMethod('TextInput.show');
+              },
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
+    final isMobile = Platform.isAndroid || Platform.isIOS;
+
     return Column(
       children: [
         // Connection Info & Control Bar
@@ -573,214 +736,227 @@ Total Characters Logged: $_screenLogBytesWritten
                     : (_isLoading ? Colors.amber : Colors.greenAccent),
               ),
               const SizedBox(width: 8),
-              Text(
-                '${widget.server.name} (${widget.server.username}@${widget.server.host})',
-                style: const TextStyle(
-                  color: Colors.white,
-                  fontWeight: FontWeight.bold,
-                  fontSize: 12,
+              Flexible(
+                child: Text(
+                  '${widget.server.name} (${widget.server.username}@${widget.server.host})',
+                  style: const TextStyle(
+                    color: Colors.white,
+                    fontWeight: FontWeight.bold,
+                    fontSize: 12,
+                  ),
+                  overflow: TextOverflow.ellipsis,
                 ),
               ),
-              Expanded(
-                child: widget.assignedTask != null
-                    ? Align(
-                        alignment: Alignment.centerLeft,
-                        child: AssignedTabTaskBanner(
-                          task: widget.assignedTask!,
-                          onCompleteTask: () {
-                            widget.onCompleteAssignedTask?.call();
-                            _requestTerminalFocus();
-                          },
-                          onUnassignTask: () {
-                            widget.onUnassignTask?.call();
-                            _requestTerminalFocus();
-                          },
-                        ),
-                      )
-                    : const SizedBox.shrink(),
-              ),
-
-              // Screen Logging Controls
-              if (_isScreenLogging)
-                InkWell(
-                  onTap: _stopScreenLogging,
-                  borderRadius: BorderRadius.circular(4),
-                  child: Container(
-                    padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
-                    margin: const EdgeInsets.only(right: 8),
-                    decoration: BoxDecoration(
-                      color: Colors.red.withOpacity(0.2),
-                      borderRadius: BorderRadius.circular(4),
-                      border: Border.all(color: Colors.redAccent.withOpacity(0.5)),
-                    ),
-                    child: Row(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        const Icon(Icons.fiber_manual_record, size: 10, color: Colors.redAccent),
-                        const SizedBox(width: 4),
-                        Text(
-                          'REC: ${p.basename(_screenLogPath ?? "log")}',
-                          style: const TextStyle(
-                            color: Colors.redAccent,
-                            fontSize: 11,
-                            fontWeight: FontWeight.bold,
-                          ),
-                        ),
-                        const SizedBox(width: 4),
-                        const Icon(Icons.close, size: 12, color: Colors.redAccent),
-                      ],
+              if (widget.assignedTask != null)
+                Flexible(
+                  child: Align(
+                    alignment: Alignment.centerLeft,
+                    child: AssignedTabTaskBanner(
+                      task: widget.assignedTask!,
+                      onCompleteTask: () {
+                        widget.onCompleteAssignedTask?.call();
+                        _requestTerminalFocus();
+                      },
+                      onUnassignTask: () {
+                        widget.onUnassignTask?.call();
+                        _requestTerminalFocus();
+                      },
                     ),
                   ),
                 )
               else
-                IconButton(
-                  icon: const Icon(Icons.fiber_manual_record_outlined, size: 15, color: Colors.grey),
-                  tooltip: 'Start Screen Log (Save streamed terminal output to file)',
-                  padding: EdgeInsets.zero,
-                  constraints: const BoxConstraints(minWidth: 26, minHeight: 24),
-                  onPressed: _startScreenLogging,
-                ),
+                const Spacer(),
 
-              // Divider
-              Container(
-                height: 14,
-                width: 1,
-                color: Colors.grey.shade700,
-                margin: const EdgeInsets.symmetric(horizontal: 4),
-              ),
-
-              // Copy & Paste Toolbar Buttons
-              IconButton(
-                icon: const Icon(Icons.copy, size: 15, color: Colors.grey),
-                tooltip: 'Copy Selection (${Platform.isMacOS ? "⌘C" : "Ctrl+Shift+C"})',
-                padding: EdgeInsets.zero,
-                constraints: const BoxConstraints(minWidth: 26, minHeight: 24),
-                onPressed: _copySelection,
-              ),
-              IconButton(
-                icon: const Icon(Icons.paste, size: 15, color: Colors.grey),
-                tooltip: 'Paste (${Platform.isMacOS ? "⌘V" : "Ctrl+V"})',
-                padding: EdgeInsets.zero,
-                constraints: const BoxConstraints(minWidth: 26, minHeight: 24),
-                onPressed: _pasteToTerminal,
-              ),
-
-              // Divider
-              Container(
-                height: 14,
-                width: 1,
-                color: Colors.grey.shade700,
-                margin: const EdgeInsets.symmetric(horizontal: 4),
-              ),
-
-              // Font size adjustment buttons
-              IconButton(
-                icon: const Icon(Icons.remove, size: 14, color: Colors.grey),
-                tooltip: 'Decrease Font Size',
-                padding: EdgeInsets.zero,
-                constraints: const BoxConstraints(minWidth: 24, minHeight: 24),
-                onPressed: _decreaseFontSize,
-              ),
-              InkWell(
-                onTap: _resetFontSize,
-                child: Padding(
-                  padding: const EdgeInsets.symmetric(horizontal: 4),
-                  child: Text(
-                    '${_fontSize.toInt()}pt',
-                    style: const TextStyle(color: Colors.grey, fontSize: 11),
-                  ),
-                ),
-              ),
-              IconButton(
-                icon: const Icon(Icons.add, size: 14, color: Colors.grey),
-                tooltip: 'Increase Font Size',
-                padding: EdgeInsets.zero,
-                constraints: const BoxConstraints(minWidth: 24, minHeight: 24),
-                onPressed: _increaseFontSize,
-              ),
-
-              // Divider
-              Container(
-                height: 14,
-                width: 1,
-                color: Colors.grey.shade700,
-                margin: const EdgeInsets.symmetric(horizontal: 4),
-              ),
-
-              // ANSI Color Scheme Selector
-              PopupMenuButton<String>(
-                tooltip: 'ANSI Color Scheme: $_currentThemeName',
-                padding: EdgeInsets.zero,
-                constraints: const BoxConstraints(minWidth: 24, minHeight: 24),
-                onSelected: _changeTheme,
-                child: Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 3),
-                  decoration: BoxDecoration(
-                    color: const Color(0xFF333333),
-                    borderRadius: BorderRadius.circular(4),
-                    border: Border.all(color: Colors.grey.shade800),
-                  ),
-                  child: Row(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      const Icon(Icons.palette_outlined, size: 12, color: Colors.amberAccent),
-                      const SizedBox(width: 4),
-                      Text(
-                        _currentThemeName,
-                        style: const TextStyle(fontSize: 11, color: Colors.white),
-                      ),
-                      const SizedBox(width: 2),
-                      const Icon(Icons.arrow_drop_down, size: 13, color: Colors.grey),
-                    ],
-                  ),
-                ),
-                itemBuilder: (context) {
-                  return AnsiThemes.all.keys.map((name) {
-                    final isSelected = name == _currentThemeName;
-                    final t = AnsiThemes.all[name]!;
-                    return PopupMenuItem<String>(
-                      value: name,
-                      height: 32,
-                      child: Row(
-                        children: [
-                          if (isSelected)
-                            const Icon(Icons.check, size: 14, color: Colors.amberAccent)
-                          else
-                            const SizedBox(width: 14),
-                          const SizedBox(width: 6),
-                          Container(
-                            width: 10,
-                            height: 10,
-                            decoration: BoxDecoration(
-                              color: t.background,
-                              shape: BoxShape.circle,
-                              border: Border.all(color: t.foreground, width: 1.5),
-                            ),
+              // Scrollable right-hand toolbar controls so narrow screens never overflow
+              SingleChildScrollView(
+                scrollDirection: Axis.horizontal,
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    // Screen Logging Controls
+                    if (_isScreenLogging)
+                      InkWell(
+                        onTap: _stopScreenLogging,
+                        borderRadius: BorderRadius.circular(4),
+                        child: Container(
+                          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+                          margin: const EdgeInsets.only(right: 8),
+                          decoration: BoxDecoration(
+                            color: Colors.red.withValues(alpha: 0.2),
+                            borderRadius: BorderRadius.circular(4),
+                            border: Border.all(color: Colors.redAccent.withValues(alpha: 0.5)),
                           ),
-                          const SizedBox(width: 8),
-                          Text(name, style: const TextStyle(fontSize: 12)),
-                        ],
+                          child: Row(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              const Icon(Icons.fiber_manual_record, size: 10, color: Colors.redAccent),
+                              const SizedBox(width: 4),
+                              Text(
+                                'REC: ${p.basename(_screenLogPath ?? "log")}',
+                                style: const TextStyle(
+                                  color: Colors.redAccent,
+                                  fontSize: 11,
+                                  fontWeight: FontWeight.bold,
+                                ),
+                              ),
+                              const SizedBox(width: 4),
+                              const Icon(Icons.close, size: 12, color: Colors.redAccent),
+                            ],
+                          ),
+                        ),
+                      )
+                    else
+                      IconButton(
+                        icon: const Icon(Icons.fiber_manual_record_outlined, size: 15, color: Colors.grey),
+                        tooltip: 'Start Screen Log (Save streamed terminal output to file)',
+                        padding: EdgeInsets.zero,
+                        constraints: const BoxConstraints(minWidth: 26, minHeight: 24),
+                        onPressed: _startScreenLogging,
                       ),
-                    );
-                  }).toList();
-                },
-              ),
 
-              const SizedBox(width: 6),
-              if (_isLoading)
-                const SizedBox(
-                  width: 14,
-                  height: 14,
-                  child: CircularProgressIndicator(strokeWidth: 2),
-                )
-              else if (_errorMessage != null)
-                IconButton(
-                  icon: const Icon(Icons.refresh, size: 16, color: Colors.amber),
-                  tooltip: 'Reconnect',
-                  padding: EdgeInsets.zero,
-                  constraints: const BoxConstraints(minWidth: 24, minHeight: 24),
-                  onPressed: _connect,
+                    // Divider
+                    Container(
+                      height: 14,
+                      width: 1,
+                      color: Colors.grey.shade700,
+                      margin: const EdgeInsets.symmetric(horizontal: 4),
+                    ),
+
+                    // Copy & Paste Toolbar Buttons
+                    IconButton(
+                      icon: const Icon(Icons.copy, size: 15, color: Colors.grey),
+                      tooltip: 'Copy Selection (${Platform.isMacOS ? "⌘C" : "Ctrl+Shift+C"})',
+                      padding: EdgeInsets.zero,
+                      constraints: const BoxConstraints(minWidth: 26, minHeight: 24),
+                      onPressed: _copySelection,
+                    ),
+                    IconButton(
+                      icon: const Icon(Icons.paste, size: 15, color: Colors.grey),
+                      tooltip: 'Paste (${Platform.isMacOS ? "⌘V" : "Ctrl+V"})',
+                      padding: EdgeInsets.zero,
+                      constraints: const BoxConstraints(minWidth: 26, minHeight: 24),
+                      onPressed: _pasteToTerminal,
+                    ),
+
+                    // Divider
+                    Container(
+                      height: 14,
+                      width: 1,
+                      color: Colors.grey.shade700,
+                      margin: const EdgeInsets.symmetric(horizontal: 4),
+                    ),
+
+                    // Font size adjustment buttons
+                    IconButton(
+                      icon: const Icon(Icons.remove, size: 14, color: Colors.grey),
+                      tooltip: 'Decrease Font Size',
+                      padding: EdgeInsets.zero,
+                      constraints: const BoxConstraints(minWidth: 24, minHeight: 24),
+                      onPressed: _decreaseFontSize,
+                    ),
+                    InkWell(
+                      onTap: _resetFontSize,
+                      child: Padding(
+                        padding: const EdgeInsets.symmetric(horizontal: 4),
+                        child: Text(
+                          '${_fontSize.toInt()}pt',
+                          style: const TextStyle(color: Colors.grey, fontSize: 11),
+                        ),
+                      ),
+                    ),
+                    IconButton(
+                      icon: const Icon(Icons.add, size: 14, color: Colors.grey),
+                      tooltip: 'Increase Font Size',
+                      padding: EdgeInsets.zero,
+                      constraints: const BoxConstraints(minWidth: 24, minHeight: 24),
+                      onPressed: _increaseFontSize,
+                    ),
+
+                    // Divider
+                    Container(
+                      height: 14,
+                      width: 1,
+                      color: Colors.grey.shade700,
+                      margin: const EdgeInsets.symmetric(horizontal: 4),
+                    ),
+
+                    // ANSI Color Scheme Selector
+                    PopupMenuButton<String>(
+                      tooltip: 'ANSI Color Scheme: $_currentThemeName',
+                      padding: EdgeInsets.zero,
+                      constraints: const BoxConstraints(minWidth: 24, minHeight: 24),
+                      onSelected: _changeTheme,
+                      child: Container(
+                        padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 3),
+                        decoration: BoxDecoration(
+                          color: const Color(0xFF333333),
+                          borderRadius: BorderRadius.circular(4),
+                          border: Border.all(color: Colors.grey.shade800),
+                        ),
+                        child: Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            const Icon(Icons.palette_outlined, size: 12, color: Colors.amberAccent),
+                            const SizedBox(width: 4),
+                            Text(
+                              _currentThemeName,
+                              style: const TextStyle(fontSize: 11, color: Colors.white),
+                            ),
+                            const SizedBox(width: 2),
+                            const Icon(Icons.arrow_drop_down, size: 13, color: Colors.grey),
+                          ],
+                        ),
+                      ),
+                      itemBuilder: (context) {
+                        return AnsiThemes.all.keys.map((name) {
+                          final isSelected = name == _currentThemeName;
+                          final t = AnsiThemes.all[name]!;
+                          return PopupMenuItem<String>(
+                            value: name,
+                            height: 32,
+                            child: Row(
+                              children: [
+                                if (isSelected)
+                                  const Icon(Icons.check, size: 14, color: Colors.amberAccent)
+                                else
+                                  const SizedBox(width: 14),
+                                const SizedBox(width: 6),
+                                Container(
+                                  width: 10,
+                                  height: 10,
+                                  decoration: BoxDecoration(
+                                    color: t.background,
+                                    shape: BoxShape.circle,
+                                    border: Border.all(color: t.foreground, width: 1.5),
+                                  ),
+                                ),
+                                const SizedBox(width: 8),
+                                Text(name, style: const TextStyle(fontSize: 12)),
+                              ],
+                            ),
+                          );
+                        }).toList();
+                      },
+                    ),
+
+                    const SizedBox(width: 6),
+                    if (_isLoading)
+                      const SizedBox(
+                        width: 14,
+                        height: 14,
+                        child: CircularProgressIndicator(strokeWidth: 2),
+                      )
+                    else if (_errorMessage != null)
+                      IconButton(
+                        icon: const Icon(Icons.refresh, size: 16, color: Colors.amber),
+                        tooltip: 'Reconnect',
+                        padding: EdgeInsets.zero,
+                        constraints: const BoxConstraints(minWidth: 24, minHeight: 24),
+                        onPressed: _connect,
+                      ),
+                  ],
                 ),
+              ),
             ],
           ),
         ),
@@ -809,6 +985,9 @@ Total Characters Logged: $_screenLogBytesWritten
             },
           ),
         ),
+
+        // Mobile Accessory Key Bar (ESC, TAB, CTRL, Arrows, Keyboard Toggle)
+        if (isMobile) _buildMobileAccessoryBar(),
       ],
     );
   }

@@ -1,16 +1,11 @@
 import 'dart:convert';
+import 'dart:isolate';
 import 'package:cryptography/cryptography.dart';
 
 /// Service responsible for Master Password key derivation (Argon2id)
 /// and AES-256-GCM symmetric encryption/decryption of server credentials.
 class CryptoVaultService {
   final AesGcm _aesGcm = AesGcm.with256bits();
-  final Argon2id _argon2 = Argon2id(
-    parallelism: 2,
-    memory: 64 * 1024, // 64 MB
-    iterations: 3,
-    hashLength: 32,
-  );
 
   /// Generates a cryptographic random salt (32 bytes) encoded as Base64.
   static String generateRandomSalt() {
@@ -19,13 +14,24 @@ class CryptoVaultService {
   }
 
   /// Derives an AES-256 SecretKey from a user password and Base64 salt.
+  /// Runs in a background isolate so the 64 MB Argon2id KDF does not block the UI thread on Android or Windows.
   Future<SecretKey> deriveMasterKey(String masterPassword, String base64Salt) async {
-    final saltBytes = base64Decode(base64Salt);
-    final secretKey = SecretKey(utf8.encode(masterPassword));
-    return await _argon2.deriveKey(
-      secretKey: secretKey,
-      nonce: saltBytes,
-    );
+    final keyBytes = await Isolate.run<List<int>>(() async {
+      final argon2 = Argon2id(
+        parallelism: 2,
+        memory: 64 * 1024, // 64 MB
+        iterations: 3,
+        hashLength: 32,
+      );
+      final saltBytes = base64Decode(base64Salt);
+      final secretKey = SecretKey(utf8.encode(masterPassword));
+      final derived = await argon2.deriveKey(
+        secretKey: secretKey,
+        nonce: saltBytes,
+      );
+      return await derived.extractBytes();
+    });
+    return SecretKey(keyBytes);
   }
 
   /// Encrypts an arbitrary Map of credentials (password, privateKey, passphrase)

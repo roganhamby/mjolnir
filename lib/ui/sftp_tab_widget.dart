@@ -1,5 +1,6 @@
 import 'dart:io';
-import 'package:flutter/foundation.dart';
+import 'dart:typed_data';
+import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:dartssh2/dartssh2.dart';
 import 'package:file_picker/file_picker.dart';
@@ -105,8 +106,8 @@ class _SftpTabWidgetState extends State<SftpTabWidget> {
 
   Future<void> _navigateUp() async {
     if (_currentRemotePath == '/' || _currentRemotePath.isEmpty) return;
-    final parent = p.dirname(_currentRemotePath);
-    await _loadDirectory(parent);
+    final parent = p.posix.dirname(_currentRemotePath);
+    await _loadDirectory(parent.isEmpty ? '/' : parent);
   }
 
   Future<void> _uploadFilePath(String localPath) async {
@@ -224,22 +225,30 @@ class _SftpTabWidgetState extends State<SftpTabWidget> {
   Future<void> _downloadFile(SftpName item) async {
     if (_sftpSession == null) return;
     final remoteSrc = p.posix.join(_currentRemotePath, item.filename);
+    final totalBytes = item.attr.size ?? 0;
     setState(() {
       _transferStatus = 'Downloading ${item.filename}...';
-      _transferProgress = 0.0;
+      _transferProgress = totalBytes > 0 ? 0.0 : null;
     });
 
     try {
       final remoteFile = await _sftpSession!.sftp.open(remoteSrc);
       final stream = remoteFile.read();
-      final chunks = <int>[];
+      final builder = BytesBuilder(copy: false);
+      var downloadedBytes = 0;
 
       await for (final chunk in stream) {
-        chunks.addAll(chunk);
+        builder.add(chunk);
+        downloadedBytes += chunk.length;
+        if (mounted && totalBytes > 0) {
+          setState(() {
+            _transferProgress = (downloadedBytes / totalBytes).clamp(0.0, 1.0);
+          });
+        }
       }
       await remoteFile.close();
 
-      final bytes = Uint8List.fromList(chunks);
+      final bytes = builder.takeBytes();
       final savedUri = await FilePicker.saveFile(
         dialogTitle: 'Save File To...',
         fileName: item.filename,
@@ -526,11 +535,21 @@ class _HoverableFileRowState extends State<HoverableFileRow> {
 
   @override
   Widget build(BuildContext context) {
+    final isTouchPlatform = Platform.isAndroid || Platform.isIOS;
+    final showActions = _isHovered || isTouchPlatform;
+
     return MouseRegion(
       onEnter: (_) => setState(() => _isHovered = true),
       onExit: (_) => setState(() => _isHovered = false),
       child: GestureDetector(
         onSecondaryTapUp: widget.onSecondaryTapUp,
+        onLongPressStart: (details) => widget.onSecondaryTapUp(
+          TapUpDetails(
+            kind: PointerDeviceKind.touch,
+            globalPosition: details.globalPosition,
+            localPosition: details.localPosition,
+          ),
+        ),
         child: Container(
           color: _isHovered ? Colors.white.withAlpha(15) : Colors.transparent,
           child: ListTile(
@@ -546,7 +565,7 @@ class _HoverableFileRowState extends State<HoverableFileRow> {
                   : '${(widget.item.attr.size ?? 0) ~/ 1024} KB • ${widget.item.attr.modifyTime}',
               style: const TextStyle(fontSize: 11),
             ),
-            trailing: _isHovered
+            trailing: showActions
                 ? Row(
                     mainAxisSize: MainAxisSize.min,
                     children: [

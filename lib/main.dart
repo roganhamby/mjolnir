@@ -1,7 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
-import 'dart:typed_data';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:file_picker/file_picker.dart';
@@ -89,8 +88,6 @@ class _MainScreenState extends State<MainScreen> {
   bool _isDerivingKey = false;
   String? _unlockError;
 
-  String _currentThemeName = 'Default Dark';
-
   final List<Color> _availableColors = [
     Colors.blueAccent,
     Colors.tealAccent,
@@ -145,6 +142,13 @@ class _MainScreenState extends State<MainScreen> {
     }
   }
 
+  void _collapseSidebarIfNarrowScreen() {
+    if (!mounted) return;
+    if (MediaQuery.sizeOf(context).width < 650) {
+      _isSidebarCollapsed = true;
+    }
+  }
+
   void _openTerminalTab(ServerConfig server) {
     final tabId = 'term-${server.id}-${DateTime.now().millisecondsSinceEpoch}';
     final themeToUse = server.terminalTheme.isNotEmpty
@@ -164,7 +168,7 @@ class _MainScreenState extends State<MainScreen> {
         ),
       );
       _activeTabIndex = _openTabs.length - 1;
-      _currentThemeName = themeToUse;
+      _collapseSidebarIfNarrowScreen();
     });
   }
 
@@ -182,6 +186,7 @@ class _MainScreenState extends State<MainScreen> {
         ),
       );
       _activeTabIndex = _openTabs.length - 1;
+      _collapseSidebarIfNarrowScreen();
     });
   }
 
@@ -190,6 +195,7 @@ class _MainScreenState extends State<MainScreen> {
     if (existingIndex >= 0) {
       setState(() {
         _activeTabIndex = existingIndex;
+        _collapseSidebarIfNarrowScreen();
       });
       return;
     }
@@ -205,6 +211,7 @@ class _MainScreenState extends State<MainScreen> {
         ),
       );
       _activeTabIndex = _openTabs.length - 1;
+      _collapseSidebarIfNarrowScreen();
     });
   }
 
@@ -288,9 +295,6 @@ class _MainScreenState extends State<MainScreen> {
           _activeTabIndex = -1;
         } else if (_activeTabIndex >= _openTabs.length) {
           _activeTabIndex = _openTabs.length - 1;
-        }
-        if (_activeTabIndex >= 0 && _openTabs[_activeTabIndex].type == 'ssh') {
-          _currentThemeName = _openTabs[_activeTabIndex].themeName;
         }
       });
     }
@@ -390,9 +394,6 @@ class _MainScreenState extends State<MainScreen> {
                   tab.title = titleController.text.trim().isEmpty ? tab.title : titleController.text.trim();
                   tab.color = selectedColor;
                   tab.themeName = selectedTheme;
-                  if (_activeTabIndex >= 0 && _openTabs[_activeTabIndex] == tab) {
-                    _currentThemeName = selectedTheme;
-                  }
                 });
                 // Persist theme to server config
                 if (tab.type == 'ssh' && tab.server != null) {
@@ -1038,7 +1039,7 @@ class _MainScreenState extends State<MainScreen> {
                 'assets/app_icon.png',
                 width: 24,
                 height: 24,
-                errorBuilder: (_, __, ___) => const Icon(Icons.bolt, color: Colors.amberAccent, size: 22),
+                errorBuilder: (context, error, stackTrace) => const Icon(Icons.bolt, color: Colors.amberAccent, size: 22),
               ),
               const SizedBox(width: 8),
               const Text('Mjölnir', style: TextStyle(fontSize: 17, fontWeight: FontWeight.bold)),
@@ -1205,7 +1206,7 @@ class _MainScreenState extends State<MainScreen> {
                 'assets/app_icon.png',
                 width: 64,
                 height: 64,
-                errorBuilder: (_, __, ___) => const Icon(Icons.bolt, size: 56, color: Colors.amberAccent),
+                errorBuilder: (context, error, stackTrace) => const Icon(Icons.bolt, size: 56, color: Colors.amberAccent),
               ),
               const SizedBox(height: 12),
               const Text(
@@ -1481,11 +1482,9 @@ class _MainScreenState extends State<MainScreen> {
                     return GestureDetector(
                       onTap: () => setState(() {
                         _activeTabIndex = index;
-                        if (tab.type == 'ssh') {
-                          _currentThemeName = tab.themeName;
-                        }
                       }),
                       onSecondaryTap: () => _renameAndRecolorTab(tab),
+                      onLongPress: () => _renameAndRecolorTab(tab),
                       child: Container(
                         padding: const EdgeInsets.symmetric(horizontal: 12),
                         decoration: BoxDecoration(
