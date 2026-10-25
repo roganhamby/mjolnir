@@ -1,5 +1,6 @@
 import 'dart:convert';
 import 'server_config.dart';
+import 'stored_string_item.dart';
 import 'task_item.dart';
 import '../services/crypto_vault_service.dart';
 
@@ -10,6 +11,7 @@ class SyncVaultFile {
   String salt;
   List<ServerConfig> servers;
   List<TaskItem> tasks;
+  List<StoredStringItem> storedStrings;
 
   SyncVaultFile({
     this.version = 1,
@@ -18,9 +20,11 @@ class SyncVaultFile {
     required this.salt,
     List<ServerConfig>? servers,
     List<TaskItem>? tasks,
+    List<StoredStringItem>? storedStrings,
   })  : updatedAt = updatedAt ?? DateTime.now().toUtc(),
         servers = servers ?? [],
-        tasks = tasks ?? [];
+        tasks = tasks ?? [],
+        storedStrings = storedStrings ?? [];
 
   /// Factory for a brand new empty vault file
   factory SyncVaultFile.createEmpty() {
@@ -28,6 +32,7 @@ class SyncVaultFile {
       salt: CryptoVaultService.generateRandomSalt(),
       servers: [],
       tasks: [],
+      storedStrings: [],
     );
   }
 
@@ -43,6 +48,7 @@ class SyncVaultFile {
         },
         'servers': servers.map((s) => s.toJson()).toList(),
         'tasks': tasks.map((t) => t.toJson()).toList(),
+        'stored_strings': storedStrings.map((s) => s.toJson()).toList(),
       };
 
   factory SyncVaultFile.fromJson(Map<String, dynamic> json) {
@@ -52,6 +58,9 @@ class SyncVaultFile {
         .toList();
     final taskList = (json['tasks'] as List<dynamic>? ?? [])
         .map((e) => TaskItem.fromJson(e as Map<String, dynamic>))
+        .toList();
+    final stringList = (json['stored_strings'] as List<dynamic>? ?? [])
+        .map((e) => StoredStringItem.fromJson(e as Map<String, dynamic>))
         .toList();
 
     return SyncVaultFile(
@@ -63,6 +72,7 @@ class SyncVaultFile {
       salt: cryptoParams['salt'] as String? ?? CryptoVaultService.generateRandomSalt(),
       servers: serverList,
       tasks: taskList,
+      storedStrings: stringList,
     );
   }
 
@@ -70,7 +80,7 @@ class SyncVaultFile {
     return const JsonEncoder.withIndent('  ').convert(toJson());
   }
 
-  /// Merges remote servers and tasks with current vault based on per-item updatedAt timestamps.
+  /// Merges remote servers, tasks, and stored strings with current vault based on per-item updatedAt timestamps.
   void mergeWith(SyncVaultFile remoteVault) {
     final Map<String, ServerConfig> currentMap = {
       for (var s in servers) s.id: s,
@@ -107,6 +117,22 @@ class SyncVaultFile {
       }
     }
 
+    final Map<String, StoredStringItem> currentStringMap = {
+      for (var s in storedStrings) s.id: s,
+    };
+
+    for (final remoteString in remoteVault.storedStrings) {
+      if (!currentStringMap.containsKey(remoteString.id)) {
+        storedStrings.add(remoteString);
+      } else {
+        final localString = currentStringMap[remoteString.id]!;
+        if (remoteString.updatedAt.isAfter(localString.updatedAt)) {
+          final index = storedStrings.indexOf(localString);
+          storedStrings[index] = remoteString;
+        }
+      }
+    }
+
     updatedAt = DateTime.now().toUtc();
   }
 
@@ -118,7 +144,9 @@ class SyncVaultFile {
     bool baselineExistedOnDisk = true,
   }) {
     if (!baselineExistedOnDisk &&
-        (candidate.servers.isNotEmpty || candidate.tasks.isNotEmpty)) {
+        (candidate.servers.isNotEmpty ||
+            candidate.tasks.isNotEmpty ||
+            candidate.storedStrings.isNotEmpty)) {
       return true;
     }
     final effectiveCandidateTime = candidateModifiedAt != null &&

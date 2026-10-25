@@ -14,6 +14,7 @@ import 'services/ssh_service.dart';
 import 'ui/terminal_tab_widget.dart';
 import 'ui/sftp_tab_widget.dart';
 import 'ui/task_manager_tab_widget.dart';
+import 'ui/stored_strings_tab_widget.dart';
 import 'ui/server_edit_dialog.dart';
 import 'theme/ansi_themes.dart';
 import 'theme/app_color_schemes.dart';
@@ -239,6 +240,31 @@ class _MainScreenState extends State<MainScreen> {
           icon: Icons.task_alt,
           color: Colors.amberAccent,
           type: 'tasks',
+        ),
+      );
+      _activeTabIndex = _openTabs.length - 1;
+      _collapseSidebarIfNarrowScreen();
+    });
+  }
+
+  void _openStoredStringsTab() {
+    final existingIndex = _openTabs.indexWhere((t) => t.type == 'strings');
+    if (existingIndex >= 0) {
+      setState(() {
+        _activeTabIndex = existingIndex;
+        _collapseSidebarIfNarrowScreen();
+      });
+      return;
+    }
+
+    setState(() {
+      _openTabs.add(
+        TabItem(
+          id: 'strings-${DateTime.now().millisecondsSinceEpoch}',
+          title: 'Stored Strings',
+          icon: Icons.content_paste,
+          color: Colors.tealAccent,
+          type: 'strings',
         ),
       );
       _activeTabIndex = _openTabs.length - 1;
@@ -1164,6 +1190,23 @@ class _MainScreenState extends State<MainScreen> {
               ),
               onPressed: _openTaskManagerTab,
             ),
+            TextButton.icon(
+              icon: Icon(
+                Icons.content_paste,
+                size: 18,
+                color: scheme.accentColor,
+              ),
+              label: Text(
+                _vaultManager.storedStrings.isEmpty
+                    ? 'Strings'
+                    : 'Strings (${_vaultManager.storedStrings.length})',
+                style: TextStyle(
+                  fontSize: 12,
+                  color: scheme.primaryText,
+                ),
+              ),
+              onPressed: _openStoredStringsTab,
+            ),
             _buildColorSchemeMenuButton(scheme),
             PopupMenuButton<String>(
               icon: const Icon(Icons.file_upload_outlined, size: 20),
@@ -1528,6 +1571,7 @@ class _MainScreenState extends State<MainScreen> {
             const SizedBox(height: 16),
             Wrap(
               spacing: 12,
+              runSpacing: 8,
               children: [
                 if (_isSidebarCollapsed)
                   ElevatedButton.icon(
@@ -1539,6 +1583,11 @@ class _MainScreenState extends State<MainScreen> {
                   icon: Icon(Icons.task_alt, size: 16, color: scheme.accentColor),
                   label: const Text('Open Task Manager'),
                   onPressed: _openTaskManagerTab,
+                ),
+                OutlinedButton.icon(
+                  icon: Icon(Icons.content_paste, size: 16, color: scheme.accentColor),
+                  label: const Text('Open Stored Strings'),
+                  onPressed: _openStoredStringsTab,
                 ),
               ],
             ),
@@ -1719,6 +1768,19 @@ class _MainScreenState extends State<MainScreen> {
                   },
                   onCompleteTask: _completeTask,
                   onAssignTaskToTab: _assignTaskToTab,
+                );
+              } else if (t.type == 'strings') {
+                return StoredStringsTabWidget(
+                  key: ValueKey(t.id),
+                  storedStrings: _vaultManager.storedStrings,
+                  onSaveStoredString: (item) async {
+                    await _vaultManager.saveStoredString(item);
+                    if (mounted) setState(() {});
+                  },
+                  onDeleteStoredString: (id) async {
+                    await _vaultManager.deleteStoredString(id);
+                    if (mounted) setState(() {});
+                  },
                 );
               } else if (t.type == 'ssh') {
                 final server = t.server!;

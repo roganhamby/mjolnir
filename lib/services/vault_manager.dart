@@ -2,6 +2,7 @@ import 'dart:convert';
 import 'package:flutter/foundation.dart';
 import 'package:cryptography/cryptography.dart';
 import '../models/server_config.dart';
+import '../models/stored_string_item.dart';
 import '../models/task_item.dart';
 import '../models/sync_vault_file.dart';
 import 'crypto_vault_service.dart';
@@ -28,6 +29,7 @@ class VaultManager with ChangeNotifier {
   SyncVaultFile? get vault => _vault;
   List<ServerConfig> get servers => _vault?.servers ?? [];
   List<TaskItem> get tasks => _vault?.tasks ?? [];
+  List<StoredStringItem> get storedStrings => _vault?.storedStrings ?? [];
   String? get errorMessage => _errorMessage;
   String get loadedSource => _loadedSource;
 
@@ -46,7 +48,9 @@ class VaultManager with ChangeNotifier {
           final remoteNewest = await dropboxService.fetchNewestVaultFromDropbox();
           if (remoteNewest != null) {
             final localHasData = localExisted &&
-                (activeVault.servers.isNotEmpty || activeVault.tasks.isNotEmpty);
+                (activeVault.servers.isNotEmpty ||
+                    activeVault.tasks.isNotEmpty ||
+                    activeVault.storedStrings.isNotEmpty);
             if (SyncVaultFile.isNewerVault(
               remoteNewest.vault,
               activeVault,
@@ -202,6 +206,17 @@ class VaultManager with ChangeNotifier {
       }
     }
 
+    for (final item in importedVault.storedStrings) {
+      final existingIndex = _vault!.storedStrings.indexWhere((s) => s.id == item.id);
+      if (existingIndex >= 0) {
+        if (item.updatedAt.isAfter(_vault!.storedStrings[existingIndex].updatedAt)) {
+          _vault!.storedStrings[existingIndex] = item;
+        }
+      } else {
+        _vault!.storedStrings.add(item);
+      }
+    }
+
     _vault!.updatedAt = DateTime.now().toUtc();
     await _persistVault();
     notifyListeners();
@@ -246,6 +261,37 @@ class VaultManager with ChangeNotifier {
     }
 
     _vault!.tasks.removeWhere((t) => t.id == taskId);
+    _vault!.updatedAt = DateTime.now().toUtc();
+    await _persistVault();
+    notifyListeners();
+  }
+
+  /// Adds or updates a stored string item and persists the vault.
+  Future<void> saveStoredString(StoredStringItem item) async {
+    if (!_isUnlocked || _vault == null) {
+      throw StateError('Cannot modify stored strings while vault is locked.');
+    }
+
+    item.updatedAt = DateTime.now().toUtc();
+    final existingIndex = _vault!.storedStrings.indexWhere((s) => s.id == item.id);
+    if (existingIndex >= 0) {
+      _vault!.storedStrings[existingIndex] = item;
+    } else {
+      _vault!.storedStrings.add(item);
+    }
+
+    _vault!.updatedAt = DateTime.now().toUtc();
+    await _persistVault();
+    notifyListeners();
+  }
+
+  /// Deletes a stored string item by ID and persists the vault.
+  Future<void> deleteStoredString(String id) async {
+    if (!_isUnlocked || _vault == null) {
+      throw StateError('Cannot modify stored strings while vault is locked.');
+    }
+
+    _vault!.storedStrings.removeWhere((s) => s.id == id);
     _vault!.updatedAt = DateTime.now().toUtc();
     await _persistVault();
     notifyListeners();
@@ -311,7 +357,9 @@ class VaultManager with ChangeNotifier {
     if (newest == null) return null;
 
     final localHasData = _vault != null &&
-        (_vault!.servers.isNotEmpty || _vault!.tasks.isNotEmpty);
+        (_vault!.servers.isNotEmpty ||
+            _vault!.tasks.isNotEmpty ||
+            _vault!.storedStrings.isNotEmpty);
     if (_vault == null ||
         SyncVaultFile.isNewerVault(
           newest.vault,

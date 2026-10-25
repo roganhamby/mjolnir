@@ -2,6 +2,7 @@ import 'dart:typed_data';
 import 'package:dartssh2/dartssh2.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:mjolnir/models/server_config.dart';
+import 'package:mjolnir/models/stored_string_item.dart';
 import 'package:mjolnir/models/task_item.dart';
 import 'package:mjolnir/models/sync_vault_file.dart';
 import 'package:mjolnir/services/crypto_vault_service.dart';
@@ -212,6 +213,68 @@ void main() {
       expect(restored.tasks.length, equals(2));
       expect(restored.tasks.first.importance, equals(TaskImportance.priority));
       expect(restored.tasks.first.title, equals('Rotate SSH keys'));
+    });
+
+    test('StoredStringItem serialization, JSON export, and import merge', () async {
+      final str1 = StoredStringItem(
+        id: 'str-1',
+        label: 'Docker logs cmd',
+        value: 'docker logs -f --tail 100 my-container',
+        updatedAt: DateTime.utc(2026, 6, 1, 10, 0),
+      );
+      final str2 = StoredStringItem(
+        id: 'str-2',
+        label: '',
+        value: 'sudo systemctl restart nginx',
+        updatedAt: DateTime.utc(2026, 6, 1, 10, 0),
+      );
+
+      final storageA = _InMemoryStorageProvider(
+        stored: SyncVaultFile(salt: salt),
+        existedOnDisk: true,
+      );
+      final managerA = VaultManager(
+        storageProvider: storageA,
+        dropboxService: _FakeDropboxSyncService(remoteResult: null),
+      );
+      await managerA.init();
+      await managerA.unlock(masterPassword);
+
+      await managerA.saveStoredString(str1);
+      await managerA.saveStoredString(str2);
+      expect(managerA.storedStrings.length, equals(2));
+
+      final exportedJson = managerA.exportVaultJson();
+
+      final storageB = _InMemoryStorageProvider(
+        stored: SyncVaultFile(
+          salt: salt,
+          storedStrings: [
+            StoredStringItem(
+              id: 'str-1',
+              label: 'Old Label',
+              value: 'docker logs old',
+              updatedAt: DateTime.utc(2026, 5, 1, 10, 0),
+            ),
+          ],
+        ),
+        existedOnDisk: true,
+      );
+      final managerB = VaultManager(
+        storageProvider: storageB,
+        dropboxService: _FakeDropboxSyncService(remoteResult: null),
+      );
+      await managerB.init();
+      await managerB.unlock(masterPassword);
+
+      await managerB.importVaultJson(exportedJson, masterPassword);
+      expect(managerB.storedStrings.length, equals(2));
+      final mergedStr1 = managerB.storedStrings.firstWhere((s) => s.id == 'str-1');
+      expect(mergedStr1.label, equals('Docker logs cmd'));
+      expect(mergedStr1.value, equals('docker logs -f --tail 100 my-container'));
+
+      await managerB.deleteStoredString('str-2');
+      expect(managerB.storedStrings.length, equals(1));
     });
 
     test('VaultManager uses the newest vault between Local and Dropbox (/App/Mjolnir) on load', () async {
