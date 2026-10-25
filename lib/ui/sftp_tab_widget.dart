@@ -14,6 +14,44 @@ import 'task_manager_tab_widget.dart';
 
 enum _DragSource { local, remote }
 
+class _TransferCancelledException implements Exception {
+  const _TransferCancelledException();
+}
+
+enum _TransferType { upload, downloadToLocal, downloadSaveAs }
+
+class _TransferJob {
+  final int id;
+  final _TransferType type;
+  final String name;
+  final String sourcePath;
+  final String? targetDir;
+  final bool isDirectory;
+  final int? size;
+  bool isCancelled = false;
+
+  _TransferJob({
+    required this.id,
+    required this.type,
+    required this.name,
+    required this.sourcePath,
+    this.targetDir,
+    this.isDirectory = false,
+    this.size,
+  });
+
+  String get description {
+    switch (type) {
+      case _TransferType.upload:
+        return 'Upload "$name" → $targetDir';
+      case _TransferType.downloadToLocal:
+        return 'Download "$name" → $targetDir';
+      case _TransferType.downloadSaveAs:
+        return 'Download "$name" (Save As)';
+    }
+  }
+}
+
 class _SftpDragPayload {
   final _DragSource source;
   final String path;
@@ -86,7 +124,10 @@ class _SftpTabWidgetState extends State<SftpTabWidget> {
   List<_LocalFileEntry> _localItems = [];
   bool _isExternalDraggingOverLocal = false;
 
-  // Shared transfer progress state
+  // Shared transfer queue & progress state
+  int _nextTransferId = 0;
+  _TransferJob? _activeTransfer;
+  final List<_TransferJob> _transferQueue = [];
   double? _transferProgress;
   String? _transferStatus;
 
@@ -398,19 +439,230 @@ class _SftpTabWidgetState extends State<SftpTabWidget> {
     }
   }
 
-  /// Uploads a local file or directory (recursively) into [targetRemoteDir].
-  Future<void> _uploadLocalPathToRemote(
-    String localPath, {
-    String? targetRemoteDir,
-    bool reloadWhenDone = true,
-  }) async {
+  void _enqueueUpload(String localPath, {String? targetRemoteDir}) {
     if (_sftpSession == null) return;
     final destDir = targetRemoteDir ?? _currentRemotePath;
+    final name = p.basename(localPath);
+    final job = _TransferJob(
+      id: ++_nextTransferId,
+      type: _TransferType.upload,
+      name: name,
+      sourcePath: localPath,
+      targetDir: destDir,
+    );
+    setState(() {
+      _transferQueue.add(job);
+    });
+    _processTransferQueue();
+  }
+
+  Future<void> _enqueueDownloadToLocal({
+    required String remotePath,
+    required String name,
+    required bool isDirectory,
+    int? size,
+    String? targetLocalDir,
+  }) async {
+    if (_sftpSession == null) return;
+    var destDir = targetLocalDir ?? _currentLocalPath;
+    if (destDir.isEmpty) {
+      await _pickLocalDirectory();
+      if (_currentLocalPath.isEmpty) return;
+      destDir = _currentLocalPath;
+    }
+    final job = _TransferJob(
+      id: ++_nextTransferId,
+      type: _TransferType.downloadToLocal,
+      name: name,
+      sourcePath: remotePath,
+      targetDir: destDir,
+      isDirectory: isDirectory,
+      size: size,
+    );
+    if (mounted) {
+      setState(() {
+        _transferQueue.add(job);
+      });
+    }
+    _processTransferQueue();
+  }
+
+  void _enqueueDownloadSaveAs(SftpName item) {
+    if (_sftpSession == null) return;
+    final remoteSrc = p.posix.join(_currentRemotePath, item.filename);
+    final job = _TransferJob(
+      id: ++_nextTransferId,
+      type: _TransferType.downloadSaveAs,
+      name: item.filename,
+      sourcePath: remoteSrc,
+      isDirectory: false,
+      size: item.attr.size,
+    );
+    setState(() {
+      _transferQueue.add(job);
+    });
+    _processTransferQueue();
+  }
+
+  void _cancelActiveTransfer() {
+    if (_activeTransfer == null) return;
+    setState(() {
+      _activeTransfer!.isCancelled = true;
+      _transferStatus = 'Cancelling ${_activeTransfer!.name}...';
+    });
+  }
+
+  void _cancelQueuedTransfer(_TransferJob job) {
+    setState(() {
+      job.isCancelled = true;
+      _transferQueue.removeWhere((item) => item.id == job.id);
+    });
+  }
+
+  void _cancelAllTransfers() {
+    setState(() {
+      for (final job in _transferQueue) {
+        job.isCancelled = true;
+      }
+      _transferQueue.clear();
+      if (_activeTransfer != null) {
+        _activeTransfer!.isCancelled = true;
+        _transferStatus = 'Cancelling ${_activeTransfer!.name}...';
+      }
+    });
+  }
+
+  Future<void> _processTransferQueue() async {
+    if (_activeTransfer != null) return;
+
+    while (_transferQueue.isNotEmpty && mounted) {
+      final job = _transferQueue.removeAt(0);
+      if (job.isCancelled) continue;
+
+      setState(() {
+        _activeTransfer = job;
+        _transferStatus = job.description;
+        _transferProgress = null;
+      });
+
+      await _runTransferJob(job);
+    }
+
+    if (mounted) {
+      setState(() {
+        _activeTransfer = null;
+        _transferStatus = null;
+        _transferProgress = null;
+      });
+    }
+  }
+
+  Future<void> _runTransferJob(_TransferJob job) async {
+    switch (job.type) {
+      case _TransferType.upload:
+        try {
+          await _uploadLocalPathToRemote(
+            job,
+            job.sourcePath,
+            targetRemoteDir: job.targetDir!,
+          );
+          await _loadRemoteDirectory(_currentRemotePath);
+          if (mounted) {
+            ScaffoldMessenger.of(context).showSnackBar(
+              SnackBar(content: Text('Uploaded "${job.name}" to ${job.targetDir}')),
+            );
+          }
+        } on _TransferCancelledException {
+          await _loadRemoteDirectory(_currentRemotePath);
+          if (mounted) {
+            ScaffoldMessenger.of(context).showSnackBar(
+              SnackBar(content: Text('Cancelled upload of "${job.name}"')),
+            );
+          }
+        } catch (e) {
+          if (mounted) {
+            ScaffoldMessenger.of(context).showSnackBar(
+              SnackBar(
+                content: Text('Upload failed for ${job.name}: $e'),
+                backgroundColor: Colors.red,
+              ),
+            );
+          }
+        }
+        break;
+
+      case _TransferType.downloadToLocal:
+        try {
+          await _downloadRemotePathToLocal(
+            job: job,
+            remotePath: job.sourcePath,
+            name: job.name,
+            isDirectory: job.isDirectory,
+            size: job.size,
+            targetLocalDir: job.targetDir!,
+          );
+          await _loadLocalDirectory(_currentLocalPath);
+          if (mounted) {
+            ScaffoldMessenger.of(context).showSnackBar(
+              SnackBar(content: Text('Downloaded "${job.name}" to ${job.targetDir}')),
+            );
+          }
+        } on _TransferCancelledException {
+          await _loadLocalDirectory(_currentLocalPath);
+          if (mounted) {
+            ScaffoldMessenger.of(context).showSnackBar(
+              SnackBar(content: Text('Cancelled download of "${job.name}"')),
+            );
+          }
+        } catch (e) {
+          if (mounted) {
+            ScaffoldMessenger.of(context).showSnackBar(
+              SnackBar(
+                content: Text('Download failed for ${job.name}: $e'),
+                backgroundColor: Colors.red,
+              ),
+            );
+          }
+        }
+        break;
+
+      case _TransferType.downloadSaveAs:
+        try {
+          await _downloadRemoteFileWithSaveAs(job);
+        } on _TransferCancelledException {
+          if (mounted) {
+            ScaffoldMessenger.of(context).showSnackBar(
+              SnackBar(content: Text('Cancelled download of "${job.name}"')),
+            );
+          }
+        } catch (e) {
+          if (mounted) {
+            ScaffoldMessenger.of(context).showSnackBar(
+              SnackBar(
+                content: Text('Download failed for ${job.name}: $e'),
+                backgroundColor: Colors.red,
+              ),
+            );
+          }
+        }
+        break;
+    }
+  }
+
+  /// Uploads a local file or directory (recursively) into [targetRemoteDir].
+  Future<void> _uploadLocalPathToRemote(
+    _TransferJob job,
+    String localPath, {
+    required String targetRemoteDir,
+  }) async {
+    if (_sftpSession == null) return;
+    if (job.isCancelled) throw const _TransferCancelledException();
+
     final type = await FileSystemEntity.type(localPath, followLinks: false);
     if (type == FileSystemEntityType.notFound) return;
 
     final name = p.basename(localPath);
-    final remoteDest = p.posix.join(destDir, name);
+    final remoteDest = p.posix.join(targetRemoteDir, name);
 
     if (type == FileSystemEntityType.directory) {
       if (mounted) {
@@ -425,38 +677,16 @@ class _SftpTabWidgetState extends State<SftpTabWidget> {
         // Directory may already exist
       }
 
-      try {
-        final children = await Directory(localPath).list(followLinks: false).toList();
-        for (final child in children) {
-          final childName = p.basename(child.path);
-          if (childName == '.' || childName == '..') continue;
-          await _uploadLocalPathToRemote(
-            child.path,
-            targetRemoteDir: remoteDest,
-            reloadWhenDone: false,
-          );
-        }
-        if (reloadWhenDone) {
-          await _loadRemoteDirectory(_currentRemotePath);
-          if (mounted) {
-            ScaffoldMessenger.of(context).showSnackBar(
-              SnackBar(content: Text('Uploaded folder "$name" to $destDir')),
-            );
-          }
-        }
-      } catch (e) {
-        if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(content: Text('Folder upload failed for $name: $e'), backgroundColor: Colors.red),
-          );
-        }
-      } finally {
-        if (reloadWhenDone && mounted) {
-          setState(() {
-            _transferStatus = null;
-            _transferProgress = null;
-          });
-        }
+      final children = await Directory(localPath).list(followLinks: false).toList();
+      for (final child in children) {
+        if (job.isCancelled) throw const _TransferCancelledException();
+        final childName = p.basename(child.path);
+        if (childName == '.' || childName == '..') continue;
+        await _uploadLocalPathToRemote(
+          job,
+          child.path,
+          targetRemoteDir: remoteDest,
+        );
       }
       return;
     }
@@ -466,23 +696,25 @@ class _SftpTabWidgetState extends State<SftpTabWidget> {
 
     if (mounted) {
       setState(() {
-        _transferStatus = 'Uploading $name to $destDir...';
+        _transferStatus = 'Uploading $name to $targetRemoteDir...';
         _transferProgress = 0.0;
       });
     }
 
-    try {
-      final remoteFile = await _sftpSession!.sftp.open(
-        remoteDest,
-        mode: SftpFileOpenMode.create | SftpFileOpenMode.write | SftpFileOpenMode.truncate,
-      );
+    final remoteFile = await _sftpSession!.sftp.open(
+      remoteDest,
+      mode: SftpFileOpenMode.create | SftpFileOpenMode.write | SftpFileOpenMode.truncate,
+    );
 
+    try {
       final totalBytes = await localFile.length();
       var uploadedBytes = 0;
       final readStream = localFile.openRead();
 
       await for (final chunk in readStream) {
+        if (job.isCancelled) break;
         await remoteFile.write(Stream.value(Uint8List.fromList(chunk)));
+        if (job.isCancelled) break;
         uploadedBytes += chunk.length;
         if (mounted && totalBytes > 0) {
           setState(() {
@@ -490,49 +722,31 @@ class _SftpTabWidgetState extends State<SftpTabWidget> {
           });
         }
       }
-
-      await remoteFile.close();
-      if (reloadWhenDone) {
-        await _loadRemoteDirectory(_currentRemotePath);
-        if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(content: Text('Uploaded "$name" to $destDir')),
-          );
-        }
-      }
-    } catch (e) {
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Upload failed for $name: $e'), backgroundColor: Colors.red),
-        );
-      }
     } finally {
-      if (reloadWhenDone && mounted) {
-        setState(() {
-          _transferStatus = null;
-          _transferProgress = null;
-        });
-      }
+      await remoteFile.close();
+    }
+
+    if (job.isCancelled) {
+      try {
+        await _sftpSession!.sftp.remove(remoteDest);
+      } catch (_) {}
+      throw const _TransferCancelledException();
     }
   }
 
   /// Downloads a remote file or directory (recursively) directly into [targetLocalDir].
   Future<void> _downloadRemotePathToLocal({
+    required _TransferJob job,
     required String remotePath,
     required String name,
     required bool isDirectory,
     int? size,
-    String? targetLocalDir,
-    bool reloadWhenDone = true,
+    required String targetLocalDir,
   }) async {
     if (_sftpSession == null) return;
-    final destDir = targetLocalDir ?? _currentLocalPath;
-    if (destDir.isEmpty) {
-      await _pickLocalDirectory();
-      if (_currentLocalPath.isEmpty) return;
-    }
-    final resolvedDestDir = targetLocalDir ?? _currentLocalPath;
-    final localDestPath = p.join(resolvedDestDir, name);
+    if (job.isCancelled) throw const _TransferCancelledException();
+
+    final localDestPath = p.join(targetLocalDir, name);
 
     if (isDirectory) {
       if (mounted) {
@@ -542,47 +756,24 @@ class _SftpTabWidgetState extends State<SftpTabWidget> {
         });
       }
 
-      try {
-        final localDir = Directory(localDestPath);
-        if (!await localDir.exists()) {
-          await localDir.create(recursive: true);
-        }
+      final localDir = Directory(localDestPath);
+      if (!await localDir.exists()) {
+        await localDir.create(recursive: true);
+      }
 
-        final children = await _sftpSession!.sftp.listdir(remotePath);
-        for (final child in children) {
-          if (child.filename == '.' || child.filename == '..') continue;
-          final childRemotePath = p.posix.join(remotePath, child.filename);
-          await _downloadRemotePathToLocal(
-            remotePath: childRemotePath,
-            name: child.filename,
-            isDirectory: child.attr.isDirectory,
-            size: child.attr.size,
-            targetLocalDir: localDestPath,
-            reloadWhenDone: false,
-          );
-        }
-
-        if (reloadWhenDone) {
-          await _loadLocalDirectory(_currentLocalPath);
-          if (mounted) {
-            ScaffoldMessenger.of(context).showSnackBar(
-              SnackBar(content: Text('Downloaded folder "$name" to $resolvedDestDir')),
-            );
-          }
-        }
-      } catch (e) {
-        if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(content: Text('Failed to download folder $name: $e'), backgroundColor: Colors.red),
-          );
-        }
-      } finally {
-        if (reloadWhenDone && mounted) {
-          setState(() {
-            _transferStatus = null;
-            _transferProgress = null;
-          });
-        }
+      final children = await _sftpSession!.sftp.listdir(remotePath);
+      for (final child in children) {
+        if (job.isCancelled) throw const _TransferCancelledException();
+        if (child.filename == '.' || child.filename == '..') continue;
+        final childRemotePath = p.posix.join(remotePath, child.filename);
+        await _downloadRemotePathToLocal(
+          job: job,
+          remotePath: childRemotePath,
+          name: child.filename,
+          isDirectory: child.attr.isDirectory,
+          size: child.attr.size,
+          targetLocalDir: localDestPath,
+        );
       }
       return;
     }
@@ -590,19 +781,19 @@ class _SftpTabWidgetState extends State<SftpTabWidget> {
     final totalBytes = size ?? 0;
     if (mounted) {
       setState(() {
-        _transferStatus = 'Downloading $name to $resolvedDestDir...';
+        _transferStatus = 'Downloading $name to $targetLocalDir...';
         _transferProgress = totalBytes > 0 ? 0.0 : null;
       });
     }
 
-    IOSink? fileSink;
-    try {
-      final remoteFile = await _sftpSession!.sftp.open(remotePath);
-      final localFile = File(localDestPath);
-      fileSink = localFile.openWrite();
+    final remoteFile = await _sftpSession!.sftp.open(remotePath);
+    final localFile = File(localDestPath);
+    IOSink? fileSink = localFile.openWrite();
 
+    try {
       var downloadedBytes = 0;
       await for (final chunk in remoteFile.read()) {
+        if (job.isCancelled) break;
         fileSink.add(chunk);
         downloadedBytes += chunk.length;
         if (mounted && totalBytes > 0) {
@@ -615,45 +806,31 @@ class _SftpTabWidgetState extends State<SftpTabWidget> {
       await fileSink.flush();
       await fileSink.close();
       fileSink = null;
-      await remoteFile.close();
-
-      if (reloadWhenDone) {
-        await _loadLocalDirectory(_currentLocalPath);
-        if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(content: Text('Downloaded "$name" to $resolvedDestDir')),
-          );
-        }
-      }
-    } catch (e) {
-      await fileSink?.close();
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Download failed for $name: $e'), backgroundColor: Colors.red),
-        );
-      }
     } finally {
-      if (reloadWhenDone && mounted) {
-        setState(() {
-          _transferStatus = null;
-          _transferProgress = null;
-        });
-      }
+      await fileSink?.close();
+      await remoteFile.close();
+    }
+
+    if (job.isCancelled) {
+      try {
+        if (await localFile.exists()) {
+          await localFile.delete();
+        }
+      } catch (_) {}
+      throw const _TransferCancelledException();
     }
   }
 
-  Future<void> _handleExternalDroppedFilesToRemote(
+  void _handleExternalDroppedFilesToRemote(
     List<String> paths, {
     String? targetRemoteDir,
-  }) async {
+  }) {
     for (final path in paths) {
-      await _uploadLocalPathToRemote(
+      _enqueueUpload(
         path,
         targetRemoteDir: targetRemoteDir,
-        reloadWhenDone: false,
       );
     }
-    await _loadRemoteDirectory(_currentRemotePath);
   }
 
   Future<void> _handleExternalDroppedFilesToLocal(List<String> paths) async {
@@ -699,7 +876,7 @@ class _SftpTabWidgetState extends State<SftpTabWidget> {
     final result = await FilePicker.pickFiles();
     if (result.isEmpty || result.first.path == null) return;
 
-    await _uploadLocalPathToRemote(result.first.path!);
+    _enqueueUpload(result.first.path!);
   }
 
   Future<void> _deleteRemoteFile(SftpName item) async {
@@ -749,22 +926,28 @@ class _SftpTabWidgetState extends State<SftpTabWidget> {
     }
   }
 
-  Future<void> _downloadRemoteFileWithSaveAs(SftpName item) async {
+  Future<void> _downloadRemoteFileWithSaveAs(_TransferJob job) async {
     if (_sftpSession == null) return;
-    final remoteSrc = p.posix.join(_currentRemotePath, item.filename);
-    final totalBytes = item.attr.size ?? 0;
-    setState(() {
-      _transferStatus = 'Downloading ${item.filename}...';
-      _transferProgress = totalBytes > 0 ? 0.0 : null;
-    });
+    if (job.isCancelled) throw const _TransferCancelledException();
+
+    final remoteSrc = job.sourcePath;
+    final totalBytes = job.size ?? 0;
+    if (mounted) {
+      setState(() {
+        _transferStatus = 'Downloading ${job.name}...';
+        _transferProgress = totalBytes > 0 ? 0.0 : null;
+      });
+    }
+
+    final remoteFile = await _sftpSession!.sftp.open(remoteSrc);
+    final builder = BytesBuilder(copy: false);
 
     try {
-      final remoteFile = await _sftpSession!.sftp.open(remoteSrc);
       final stream = remoteFile.read();
-      final builder = BytesBuilder(copy: false);
       var downloadedBytes = 0;
 
       await for (final chunk in stream) {
+        if (job.isCancelled) break;
         builder.add(chunk);
         downloadedBytes += chunk.length;
         if (mounted && totalBytes > 0) {
@@ -773,35 +956,27 @@ class _SftpTabWidgetState extends State<SftpTabWidget> {
           });
         }
       }
-      await remoteFile.close();
-
-      final bytes = builder.takeBytes();
-      final savedUri = await FilePicker.saveFile(
-        dialogTitle: 'Save File To...',
-        fileName: item.filename,
-        bytes: bytes,
-      );
-
-      if (savedUri != null && mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Downloaded ${item.filename} successfully.')),
-        );
-        if (_currentLocalPath.isNotEmpty) {
-          await _loadLocalDirectory(_currentLocalPath);
-        }
-      }
-    } catch (e) {
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Download failed: $e'), backgroundColor: Colors.red),
-        );
-      }
     } finally {
-      if (mounted) {
-        setState(() {
-          _transferStatus = null;
-          _transferProgress = null;
-        });
+      await remoteFile.close();
+    }
+
+    if (job.isCancelled) {
+      throw const _TransferCancelledException();
+    }
+
+    final bytes = builder.takeBytes();
+    final savedUri = await FilePicker.saveFile(
+      dialogTitle: 'Save File To...',
+      fileName: job.name,
+      bytes: bytes,
+    );
+
+    if (savedUri != null && mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Downloaded ${job.name} successfully.')),
+      );
+      if (_currentLocalPath.isNotEmpty) {
+        await _loadLocalDirectory(_currentLocalPath);
       }
     }
   }
@@ -838,7 +1013,7 @@ class _SftpTabWidgetState extends State<SftpTabWidget> {
         ),
       ],
     ).then((choice) {
-      if (choice == 'upload') _uploadLocalPathToRemote(entry.path);
+      if (choice == 'upload') _enqueueUpload(entry.path);
       if (choice == 'delete') _deleteLocalEntry(entry);
     });
   }
@@ -889,20 +1064,25 @@ class _SftpTabWidgetState extends State<SftpTabWidget> {
       ],
     ).then((choice) {
       if (choice == 'download_local_pane') {
-        _downloadRemotePathToLocal(
+        _enqueueDownloadToLocal(
           remotePath: remotePath,
           name: item.filename,
           isDirectory: isDir,
           size: item.attr.size,
         );
       }
-      if (choice == 'save_as') _downloadRemoteFileWithSaveAs(item);
+      if (choice == 'save_as') _enqueueDownloadSaveAs(item);
       if (choice == 'delete') _deleteRemoteFile(item);
     });
   }
 
   @override
   void dispose() {
+    _activeTransfer?.isCancelled = true;
+    for (final job in _transferQueue) {
+      job.isCancelled = true;
+    }
+    _transferQueue.clear();
     _sftpSession?.close();
     super.dispose();
   }
@@ -996,7 +1176,7 @@ class _SftpTabWidgetState extends State<SftpTabWidget> {
                   details.data.source == _DragSource.remote,
               onAcceptWithDetails: (details) {
                 final payload = details.data;
-                _downloadRemotePathToLocal(
+                _enqueueDownloadToLocal(
                   remotePath: payload.path,
                   name: payload.name,
                   isDirectory: payload.isDirectory,
@@ -1070,7 +1250,7 @@ class _SftpTabWidgetState extends State<SftpTabWidget> {
                               acceptsDropFrom: entry.isDirectory ? _DragSource.remote : null,
                               onAcceptDrop: entry.isDirectory
                                   ? (incoming) {
-                                      _downloadRemotePathToLocal(
+                                      _enqueueDownloadToLocal(
                                         remotePath: incoming.path,
                                         name: incoming.name,
                                         isDirectory: incoming.isDirectory,
@@ -1094,7 +1274,7 @@ class _SftpTabWidgetState extends State<SftpTabWidget> {
                                     _loadLocalDirectory(entry.path);
                                   }
                                 },
-                                onPrimaryAction: () => _uploadLocalPathToRemote(entry.path),
+                                onPrimaryAction: () => _enqueueUpload(entry.path),
                                 onDelete: () => _deleteLocalEntry(entry),
                                 onSecondaryTapUp: (details) =>
                                     _showLocalContextMenu(context, details.globalPosition, entry),
@@ -1230,7 +1410,7 @@ class _SftpTabWidgetState extends State<SftpTabWidget> {
               onWillAcceptWithDetails: (details) =>
                   details.data.source == _DragSource.local,
               onAcceptWithDetails: (details) {
-                _uploadLocalPathToRemote(details.data.path);
+                _enqueueUpload(details.data.path);
               },
               builder: (context, candidateData, rejectedData) {
                 final isHighlighted =
@@ -1295,7 +1475,7 @@ class _SftpTabWidgetState extends State<SftpTabWidget> {
                               acceptsDropFrom: isDir ? _DragSource.local : null,
                               onAcceptDrop: isDir
                                   ? (incoming) {
-                                      _uploadLocalPathToRemote(
+                                      _enqueueUpload(
                                         incoming.path,
                                         targetRemoteDir: remoteItemPath,
                                       );
@@ -1317,26 +1497,26 @@ class _SftpTabWidgetState extends State<SftpTabWidget> {
                                   if (isDir) {
                                     _loadRemoteDirectory(remoteItemPath);
                                   } else if (_showLocalPane && _currentLocalPath.isNotEmpty) {
-                                    _downloadRemotePathToLocal(
+                                    _enqueueDownloadToLocal(
                                       remotePath: remoteItemPath,
                                       name: item.filename,
                                       isDirectory: false,
                                       size: item.attr.size,
                                     );
                                   } else {
-                                    _downloadRemoteFileWithSaveAs(item);
+                                    _enqueueDownloadSaveAs(item);
                                   }
                                 },
                                 onPrimaryAction: () {
                                   if (_showLocalPane && _currentLocalPath.isNotEmpty) {
-                                    _downloadRemotePathToLocal(
+                                    _enqueueDownloadToLocal(
                                       remotePath: remoteItemPath,
                                       name: item.filename,
                                       isDirectory: isDir,
                                       size: item.attr.size,
                                     );
                                   } else if (!isDir) {
-                                    _downloadRemoteFileWithSaveAs(item);
+                                    _enqueueDownloadSaveAs(item);
                                   }
                                 },
                                 onDelete: () => _deleteRemoteFile(item),
@@ -1401,6 +1581,122 @@ class _SftpTabWidgetState extends State<SftpTabWidget> {
     return '$y-$m-$d';
   }
 
+  Widget _buildTransferBanner(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 6),
+      color: Colors.blue.withAlpha(45),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          if (_activeTransfer != null || _transferStatus != null)
+            Row(
+              children: [
+                const SizedBox(
+                  width: 14,
+                  height: 14,
+                  child: CircularProgressIndicator(strokeWidth: 2),
+                ),
+                const SizedBox(width: 10),
+                Expanded(
+                  child: Text(
+                    _transferStatus ?? _activeTransfer?.description ?? 'Transferring...',
+                    style: const TextStyle(fontSize: 12),
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                ),
+                if (_transferQueue.isNotEmpty) ...[
+                  Container(
+                    margin: const EdgeInsets.only(right: 8),
+                    padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                    decoration: BoxDecoration(
+                      color: Colors.blueAccent.withAlpha(60),
+                      borderRadius: BorderRadius.circular(10),
+                    ),
+                    child: Text(
+                      '+${_transferQueue.length} queued',
+                      style: const TextStyle(fontSize: 11, fontWeight: FontWeight.w600),
+                    ),
+                  ),
+                ],
+                if (_transferProgress != null) ...[
+                  SizedBox(
+                    width: 120,
+                    child: LinearProgressIndicator(value: _transferProgress),
+                  ),
+                  const SizedBox(width: 8),
+                  Text(
+                    '${((_transferProgress ?? 0) * 100).toInt()}%',
+                    style: const TextStyle(fontSize: 12),
+                  ),
+                ],
+                const SizedBox(width: 8),
+                TextButton.icon(
+                  style: TextButton.styleFrom(
+                    foregroundColor: Colors.redAccent,
+                    visualDensity: VisualDensity.compact,
+                    padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+                  ),
+                  icon: const Icon(Icons.close, size: 15),
+                  label: const Text('Cancel', style: TextStyle(fontSize: 12)),
+                  onPressed: _activeTransfer != null && !_activeTransfer!.isCancelled
+                      ? _cancelActiveTransfer
+                      : null,
+                ),
+                if (_transferQueue.isNotEmpty)
+                  TextButton(
+                    style: TextButton.styleFrom(
+                      foregroundColor: Colors.redAccent,
+                      visualDensity: VisualDensity.compact,
+                      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+                    ),
+                    onPressed: _cancelAllTransfers,
+                    child: const Text('Cancel All', style: TextStyle(fontSize: 12)),
+                  ),
+              ],
+            ),
+          if (_transferQueue.isNotEmpty) ...[
+            const SizedBox(height: 4),
+            ..._transferQueue.take(3).map(
+                  (queuedJob) => Padding(
+                    padding: const EdgeInsets.only(top: 2),
+                    child: Row(
+                      children: [
+                        const Icon(Icons.schedule, size: 13, color: Colors.white70),
+                        const SizedBox(width: 8),
+                        Expanded(
+                          child: Text(
+                            'Queued: ${queuedJob.description}',
+                            style: const TextStyle(fontSize: 11, color: Colors.white70),
+                            overflow: TextOverflow.ellipsis,
+                          ),
+                        ),
+                        IconButton(
+                          icon: const Icon(Icons.close, size: 14, color: Colors.redAccent),
+                          tooltip: 'Remove from queue',
+                          visualDensity: VisualDensity.compact,
+                          constraints: const BoxConstraints(),
+                          padding: const EdgeInsets.symmetric(horizontal: 4),
+                          onPressed: () => _cancelQueuedTransfer(queuedJob),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+            if (_transferQueue.length > 3)
+              Padding(
+                padding: const EdgeInsets.only(top: 2, left: 21),
+                child: Text(
+                  '...and ${_transferQueue.length - 3} more in queue',
+                  style: const TextStyle(fontSize: 11, color: Colors.white54),
+                ),
+              ),
+          ],
+        ],
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     return Column(
@@ -1418,40 +1714,9 @@ class _SftpTabWidgetState extends State<SftpTabWidget> {
             ),
           ),
 
-        // Transfer Progress Indicator
-        if (_transferStatus != null)
-          Container(
-            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 6),
-            color: Colors.blue.withAlpha(50),
-            child: Row(
-              children: [
-                const SizedBox(
-                  width: 14,
-                  height: 14,
-                  child: CircularProgressIndicator(strokeWidth: 2),
-                ),
-                const SizedBox(width: 10),
-                Expanded(
-                  child: Text(
-                    _transferStatus!,
-                    style: const TextStyle(fontSize: 12),
-                    overflow: TextOverflow.ellipsis,
-                  ),
-                ),
-                if (_transferProgress != null) ...[
-                  SizedBox(
-                    width: 120,
-                    child: LinearProgressIndicator(value: _transferProgress),
-                  ),
-                  const SizedBox(width: 8),
-                  Text(
-                    '${((_transferProgress ?? 0) * 100).toInt()}%',
-                    style: const TextStyle(fontSize: 12),
-                  ),
-                ],
-              ],
-            ),
-          ),
+        // Transfer Progress & Queue Indicator
+        if (_activeTransfer != null || _transferStatus != null || _transferQueue.isNotEmpty)
+          _buildTransferBanner(context),
 
         // Main Dual-Pane or Single-Pane Area
         Expanded(
