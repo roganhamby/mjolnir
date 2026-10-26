@@ -39,15 +39,19 @@ class _StoredStringsTabWidgetState extends State<StoredStringsTabWidget> {
     super.dispose();
   }
 
+  static String normalizeMultilineValue(String raw) {
+    return raw.replaceAll('\r\n', '\n').replaceAll('\r', '\n');
+  }
+
   Future<void> _handleAddString() async {
-    final value = _valueController.text.trim();
-    if (value.isEmpty) return;
+    final normalized = normalizeMultilineValue(_valueController.text);
+    if (normalized.trim().isEmpty) return;
 
     final label = _labelController.text.trim();
     final item = StoredStringItem(
       id: const Uuid().v4(),
       label: label,
-      value: value,
+      value: normalized,
     );
 
     await widget.onSaveStoredString(item);
@@ -113,8 +117,10 @@ class _StoredStringsTabWidgetState extends State<StoredStringsTabWidget> {
               TextField(
                 controller: valueCtrl,
                 autofocus: true,
-                maxLines: 4,
-                minLines: 1,
+                maxLines: 8,
+                minLines: 2,
+                keyboardType: TextInputType.multiline,
+                textInputAction: TextInputAction.newline,
                 style: const TextStyle(fontFamily: 'monospace', fontSize: 13),
                 decoration: const InputDecoration(
                   labelText: 'String Value',
@@ -131,8 +137,8 @@ class _StoredStringsTabWidgetState extends State<StoredStringsTabWidget> {
           ),
           ElevatedButton(
             onPressed: () async {
-              final newValue = valueCtrl.text.trim();
-              if (newValue.isEmpty) return;
+              final newValue = normalizeMultilineValue(valueCtrl.text);
+              if (newValue.trim().isEmpty) return;
               item.label = labelCtrl.text.trim();
               item.value = newValue;
               await widget.onSaveStoredString(item);
@@ -184,63 +190,82 @@ class _StoredStringsTabWidgetState extends State<StoredStringsTabWidget> {
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              Row(
+              Wrap(
+                spacing: 12,
+                runSpacing: 8,
+                alignment: WrapAlignment.spaceBetween,
+                crossAxisAlignment: WrapCrossAlignment.center,
                 children: [
-                  Icon(Icons.content_paste, color: scheme.accentColor, size: 18),
-                  const SizedBox(width: 8),
-                  Text(
-                    'Stored Strings (${widget.storedStrings.length})',
-                    style: TextStyle(
-                      fontSize: 14,
-                      fontWeight: FontWeight.bold,
-                      color: scheme.primaryText,
-                    ),
-                  ),
-                  const Spacer(),
-                  SizedBox(
-                    width: 200,
-                    child: TextField(
-                      controller: _searchController,
-                      style: const TextStyle(fontSize: 12),
-                      decoration: InputDecoration(
-                        hintText: 'Filter strings...',
-                        isDense: true,
-                        prefixIcon: const Icon(Icons.search, size: 15),
-                        prefixIconConstraints: const BoxConstraints(minWidth: 30, minHeight: 28),
-                        suffixIcon: _searchQuery.isNotEmpty
-                            ? IconButton(
-                                icon: const Icon(Icons.clear, size: 14),
-                                padding: EdgeInsets.zero,
-                                constraints: const BoxConstraints(minWidth: 24, minHeight: 24),
-                                onPressed: () {
-                                  _searchController.clear();
-                                  setState(() => _searchQuery = '');
-                                },
-                              )
-                            : null,
-                        contentPadding: const EdgeInsets.symmetric(horizontal: 10, vertical: 7),
-                        border: const OutlineInputBorder(),
+                  Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Icon(Icons.content_paste, color: scheme.accentColor, size: 18),
+                      const SizedBox(width: 8),
+                      Text(
+                        'Stored Strings (${widget.storedStrings.length})',
+                        style: TextStyle(
+                          fontSize: 14,
+                          fontWeight: FontWeight.bold,
+                          color: scheme.primaryText,
+                        ),
                       ),
-                      onChanged: (val) => setState(() => _searchQuery = val),
-                    ),
-                  ),
-                  const SizedBox(width: 12),
-                  Text('Sort by: ', style: TextStyle(fontSize: 12, color: scheme.mutedText)),
-                  const SizedBox(width: 4),
-                  DropdownButton<String>(
-                    value: _sortBy,
-                    isDense: true,
-                    underline: const SizedBox.shrink(),
-                    style: TextStyle(fontSize: 12, color: scheme.primaryText),
-                    dropdownColor: scheme.elevatedSurface,
-                    items: const [
-                      DropdownMenuItem(value: 'created', child: Text('Newest First')),
-                      DropdownMenuItem(value: 'updated', child: Text('Recently Updated')),
-                      DropdownMenuItem(value: 'label', child: Text('Alphabetical')),
                     ],
-                    onChanged: (val) {
-                      if (val != null) setState(() => _sortBy = val);
-                    },
+                  ),
+                  Wrap(
+                    spacing: 12,
+                    runSpacing: 8,
+                    crossAxisAlignment: WrapCrossAlignment.center,
+                    children: [
+                      SizedBox(
+                        width: 200,
+                        child: TextField(
+                          controller: _searchController,
+                          style: const TextStyle(fontSize: 12),
+                          decoration: InputDecoration(
+                            hintText: 'Filter strings...',
+                            isDense: true,
+                            prefixIcon: const Icon(Icons.search, size: 15),
+                            prefixIconConstraints: const BoxConstraints(minWidth: 30, minHeight: 28),
+                            suffixIcon: _searchQuery.isNotEmpty
+                                ? IconButton(
+                                    icon: const Icon(Icons.clear, size: 14),
+                                    padding: EdgeInsets.zero,
+                                    constraints: const BoxConstraints(minWidth: 24, minHeight: 24),
+                                    onPressed: () {
+                                      _searchController.clear();
+                                      setState(() => _searchQuery = '');
+                                    },
+                                  )
+                                : null,
+                            contentPadding: const EdgeInsets.symmetric(horizontal: 10, vertical: 7),
+                            border: const OutlineInputBorder(),
+                          ),
+                          onChanged: (val) => setState(() => _searchQuery = val),
+                        ),
+                      ),
+                      Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Text('Sort by: ', style: TextStyle(fontSize: 12, color: scheme.mutedText)),
+                          const SizedBox(width: 4),
+                          DropdownButton<String>(
+                            value: _sortBy,
+                            isDense: true,
+                            underline: const SizedBox.shrink(),
+                            style: TextStyle(fontSize: 12, color: scheme.primaryText),
+                            dropdownColor: scheme.elevatedSurface,
+                            items: const [
+                              DropdownMenuItem(value: 'created', child: Text('Newest First')),
+                              DropdownMenuItem(value: 'updated', child: Text('Recently Updated')),
+                              DropdownMenuItem(value: 'label', child: Text('Alphabetical')),
+                            ],
+                            onChanged: (val) {
+                              if (val != null) setState(() => _sortBy = val);
+                            },
+                          ),
+                        ],
+                      ),
+                    ],
                   ),
                 ],
               ),
@@ -266,9 +291,13 @@ class _StoredStringsTabWidgetState extends State<StoredStringsTabWidget> {
                     ),
                   ),
                   SizedBox(
-                    width: 340,
+                    width: 360,
                     child: TextField(
                       controller: _valueController,
+                      minLines: 1,
+                      maxLines: 5,
+                      keyboardType: TextInputType.multiline,
+                      textInputAction: TextInputAction.newline,
                       style: const TextStyle(fontSize: 13, fontFamily: 'monospace'),
                       decoration: const InputDecoration(
                         hintText: 'String to store for quick copy...',
@@ -276,7 +305,6 @@ class _StoredStringsTabWidgetState extends State<StoredStringsTabWidget> {
                         contentPadding: EdgeInsets.symmetric(horizontal: 12, vertical: 10),
                         border: OutlineInputBorder(),
                       ),
-                      onSubmitted: (_) => _handleAddString(),
                     ),
                   ),
                   ElevatedButton.icon(

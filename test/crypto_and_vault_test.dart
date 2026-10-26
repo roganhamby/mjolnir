@@ -1,5 +1,7 @@
+import 'dart:convert';
 import 'dart:typed_data';
 import 'package:dartssh2/dartssh2.dart';
+import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:mjolnir/models/server_config.dart';
 import 'package:mjolnir/models/stored_string_item.dart';
@@ -11,6 +13,7 @@ import 'package:mjolnir/services/ssh_service.dart';
 import 'package:mjolnir/services/sync_storage_provider.dart';
 import 'package:mjolnir/services/vault_manager.dart';
 import 'package:mjolnir/theme/app_color_schemes.dart';
+import 'package:mjolnir/ui/stored_strings_tab_widget.dart';
 
 class _InMemoryStorageProvider implements SyncStorageProvider {
   SyncVaultFile? stored;
@@ -51,6 +54,19 @@ class _FakeDropboxSyncService extends DropboxSyncService {
 
   @override
   Future<void> loadConfig() async {}
+
+  @override
+  Future<void> saveConfig(DropboxConfig newConfig) async {
+    fakeConfig = newConfig;
+  }
+
+  @override
+  Future<String> uploadVaultJson(
+    String jsonString, {
+    String fileName = 'servers.json',
+  }) async {
+    return '$normalizedFolderPath/$fileName';
+  }
 
   @override
   Future<({SyncVaultFile vault, String rawJson, String filePath, DateTime modifiedAt})?> fetchNewestVaultFromDropbox() async {
@@ -481,6 +497,114 @@ void main() {
       expect(lastProgress, equals(totalSize));
       expect(recordedOffsets, equals([0, 65536, 131072, 196608]));
       expect(remoteBuffer, equals(expectedBytes));
+    });
+
+    test('Exports encrypted Dropbox API credentials in JSON and restores them on new station setup', () async {
+      final stationADropbox = _FakeDropboxSyncService(
+        remoteResult: null,
+        config: DropboxConfig(
+          accessToken: 'sl.u.secret-dropbox-token-xyz',
+          appKey: 'dbx-app-key-123',
+          appSecret: 'dbx-app-secret-456',
+          refreshToken: 'dbx-refresh-token-789',
+          folderPath: '/App/Mjolnir',
+          autoSyncOnLoadAndSave: true,
+        ),
+      );
+      final stationAStorage = _InMemoryStorageProvider(
+        stored: SyncVaultFile(salt: salt),
+        existedOnDisk: true,
+      );
+      final managerA = VaultManager(
+        storageProvider: stationAStorage,
+        dropboxService: stationADropbox,
+      );
+      await managerA.init();
+      final unlockedA = await managerA.unlock(masterPassword);
+      expect(unlockedA, isTrue);
+
+      await managerA.saveServer(
+        ServerConfig(
+          id: 'srv-station-1',
+          name: 'Bastion Host',
+          host: '192.168.1.50',
+          username: 'devops',
+          decryptedCredentials: ServerCredentials(password: 'bastion-pw'),
+        ),
+      );
+
+      final exportedJson = await managerA.prepareAndExportVaultJson();
+      final decodedExport = jsonDecode(exportedJson) as Map<String, dynamic>;
+      expect(decodedExport['encrypted_dropbox_config'], isNotNull);
+      // Plaintext token must NEVER appear in the exported JSON
+      expect(exportedJson.contains('sl.u.secret-dropbox-token-xyz'), isFalse);
+      expect(exportedJson.contains('dbx-refresh-token-789'), isFalse);
+
+      // Station B: brand new unconfigured station (locked, empty Dropbox config)
+      final stationBDropbox = _FakeDropboxSyncService(
+        remoteResult: null,
+        config: DropboxConfig(accessToken: ''),
+      );
+      expect(stationBDropbox.config.isConfigured, isFalse);
+
+      final stationBStorage = _InMemoryStorageProvider(existedOnDisk: false);
+      final managerB = VaultManager(
+        storageProvider: stationBStorage,
+        dropboxService: stationBDropbox,
+      );
+      await managerB.init();
+
+      // Quick station setup right from lock screen using exported JSON + masterPassword
+      final setupResult = await managerB.importAndUnlockVaultJson(
+        exportedJson,
+        masterPassword,
+      );
+      expect(setupResult.serverCount, equals(1));
+      expect(setupResult.dropboxConfigured, isTrue);
+      expect(managerB.isUnlocked, isTrue);
+      expect(managerB.servers.first.decryptedCredentials?.password, equals('bastion-pw'));
+      expect(stationBDropbox.config.isConfigured, isTrue);
+      expect(stationBDropbox.config.accessToken, equals('sl.u.secret-dropbox-token-xyz'));
+      expect(stationBDropbox.config.appKey, equals('dbx-app-key-123'));
+      expect(stationBDropbox.config.appSecret, equals('dbx-app-secret-456'));
+      expect(stationBDropbox.config.refreshToken, equals('dbx-refresh-token-789'));
+    });
+
+    testWidgets('StoredStringsTabWidget preserves \\n newlines in multi-line strings without merging lines', (tester) async {
+      final savedItems = <StoredStringItem>[];
+
+      await tester.pumpWidget(
+        MaterialApp(
+          theme: AppColorSchemes.mjolnirAmber.toThemeData(),
+          home: Scaffold(
+            body: StoredStringsTabWidget(
+              storedStrings: savedItems,
+              onSaveStoredString: (item) async {
+                savedItems.add(item);
+              },
+              onDeleteStoredString: (id) async {
+                savedItems.removeWhere((e) => e.id == id);
+              },
+            ),
+          ),
+        ),
+      );
+
+      const multilineScript = 'export FOO=bar\necho "\$FOO"\nsystemctl status nginx';
+      final valueField = find.widgetWithText(
+        TextField,
+        'String to store for quick copy...',
+      );
+      expect(valueField, findsOneWidget);
+
+      await tester.enterText(valueField, multilineScript);
+      await tester.tap(find.text('Add String'));
+      await tester.pumpAndSettle();
+
+      expect(savedItems.length, equals(1));
+      expect(savedItems.first.value, equals(multilineScript));
+      expect(savedItems.first.value.contains('\n'), isTrue);
+      expect(savedItems.first.value.split('\n').length, equals(3));
     });
   });
 }

@@ -498,7 +498,7 @@ class _MainScreenState extends State<MainScreen> {
 
   Future<void> _exportVault() async {
     try {
-      final jsonString = _vaultManager.exportVaultJson();
+      final jsonString = await _vaultManager.prepareAndExportVaultJson();
       final bytes = Uint8List.fromList(utf8.encode(jsonString));
       final dateStr = DateTime.now().toIso8601String().split('T').first;
 
@@ -657,7 +657,7 @@ class _MainScreenState extends State<MainScreen> {
               folderPath: folderController.text.trim().isEmpty ? '/App/Mjolnir' : folderController.text.trim(),
               autoSyncOnLoadAndSave: autoSync,
             );
-            await dropbox.saveConfig(newConfig);
+            await _vaultManager.saveDropboxConfig(newConfig);
           }
 
           return AlertDialog(
@@ -789,6 +789,7 @@ class _MainScreenState extends State<MainScreen> {
                                           appSecret: appSecretController.text,
                                           authCode: authCodeController.text,
                                         );
+                                        await _vaultManager.saveDropboxConfig(dropbox.config);
                                         tokenController.text = dropbox.config.accessToken;
                                         refreshTokenController.text = dropbox.config.refreshToken ?? '';
                                         setDialogState(() {
@@ -997,26 +998,38 @@ class _MainScreenState extends State<MainScreen> {
 
       if (!mounted) return;
 
-      // Ask for the Master Password used when exporting the file
-      final importPassController = TextEditingController();
+      final isCurrentlyUnlocked = _vaultManager.isUnlocked;
+      // Ask for the Master Password used when exporting the file (prefill if typed on lock screen)
+      final importPassController = TextEditingController(
+        text: isCurrentlyUnlocked ? '' : _masterPasswordController.text,
+      );
       final confirm = await showDialog<bool>(
         context: context,
         builder: (ctx) => AlertDialog(
-          title: const Text('Import Connections JSON'),
+          title: Text(
+            isCurrentlyUnlocked
+                ? 'Import Connections JSON'
+                : 'Quick Station Setup from JSON',
+          ),
           content: Column(
             mainAxisSize: MainAxisSize.min,
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              const Text('Enter the Master Password used to encrypt this JSON file:'),
+              Text(
+                isCurrentlyUnlocked
+                    ? 'Enter the Master Password used to encrypt this JSON file (merges servers, tasks, strings, and encrypted Dropbox API credentials):'
+                    : 'Enter the Master Password used to encrypt this JSON file to unlock and configure this station:',
+              ),
               const SizedBox(height: 12),
               TextField(
                 controller: importPassController,
                 obscureText: true,
                 autofocus: true,
                 decoration: const InputDecoration(
-                  labelText: 'Import Master Password',
+                  labelText: 'Vault Master Password',
                   border: OutlineInputBorder(),
                 ),
+                onSubmitted: (_) => Navigator.of(ctx).pop(true),
               ),
             ],
           ),
@@ -1027,19 +1040,47 @@ class _MainScreenState extends State<MainScreen> {
             ),
             ElevatedButton(
               onPressed: () => Navigator.of(ctx).pop(true),
-              child: const Text('Import & Merge'),
+              child: Text(isCurrentlyUnlocked ? 'Import & Merge' : 'Import & Unlock'),
             ),
           ],
         ),
       );
 
       if (confirm == true && importPassController.text.isNotEmpty && mounted) {
-        final count = await _vaultManager.importVaultJson(content, importPassController.text);
-        if (mounted) {
-          setState(() {});
-          ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(content: Text('Imported and merged $count server(s).')),
+        if (!isCurrentlyUnlocked) {
+          final res = await _vaultManager.importAndUnlockVaultJson(
+            content,
+            importPassController.text,
           );
+          _masterPasswordController.clear();
+          if (mounted) {
+            setState(() {});
+            ScaffoldMessenger.of(context).showSnackBar(
+              SnackBar(
+                content: Text(
+                  res.dropboxConfigured
+                      ? 'Station ready: imported ${res.serverCount} server(s) and restored Dropbox API credentials.'
+                      : 'Station ready: imported ${res.serverCount} server(s).',
+                ),
+              ),
+            );
+          }
+        } else {
+          final hadDropboxBefore = _vaultManager.dropboxService.config.isConfigured;
+          final count = await _vaultManager.importVaultJson(content, importPassController.text);
+          final hasDropboxNow = _vaultManager.dropboxService.config.isConfigured;
+          if (mounted) {
+            setState(() {});
+            ScaffoldMessenger.of(context).showSnackBar(
+              SnackBar(
+                content: Text(
+                  (!hadDropboxBefore && hasDropboxNow)
+                      ? 'Imported and merged $count server(s) and restored Dropbox API credentials.'
+                      : 'Imported and merged $count server(s).',
+                ),
+              ),
+            );
+          }
         }
       }
     } catch (e) {
@@ -1418,6 +1459,18 @@ class _MainScreenState extends State<MainScreen> {
                 ),
               ),
               const SizedBox(height: 12),
+              TextButton.icon(
+                icon: Icon(
+                  Icons.file_upload_outlined,
+                  size: 16,
+                  color: scheme.accentColor,
+                ),
+                label: const Text(
+                  'Import JSON Vault (Quick Station Setup)',
+                  style: TextStyle(fontSize: 12),
+                ),
+                onPressed: _importVault,
+              ),
               TextButton.icon(
                 icon: Icon(
                   Icons.cloud_sync_outlined,
