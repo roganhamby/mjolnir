@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'dart:typed_data';
 import 'package:cryptography/cryptography.dart' show Sha1;
 import 'package:dartssh2/dartssh2.dart';
+import 'package:path/path.dart' as p;
 import '../models/server_config.dart';
 
 class SshSession {
@@ -303,5 +304,53 @@ class SshService {
       client: client,
       sftp: sftp,
     );
+  }
+
+  /// Resolves an SFTP remote path against [homePath].
+  ///
+  /// SFTP protocol requests (`SSH_FXP_OPENDIR`, `SSH_FXP_OPEN`, etc.) do not
+  /// expand shell tilde (`~` or `~/`). This resolves `~`, `~/`, `~/subdir`,
+  /// empty/`.` paths, and relative paths against the resolved remote [homePath].
+  static String resolveRemotePath(
+    String rawPath, {
+    required String homePath,
+  }) {
+    final normalizedHome = homePath.trim().isEmpty
+        ? '/'
+        : p.posix.normalize(homePath.trim());
+    final trimmed = rawPath.trim();
+    if (trimmed.isEmpty || trimmed == '~' || trimmed == '~/' || trimmed == '.') {
+      return normalizedHome;
+    }
+    if (trimmed.startsWith('~/')) {
+      final sub = trimmed.substring(2);
+      if (sub.isEmpty) return normalizedHome;
+      return p.posix.normalize(p.posix.join(normalizedHome, sub));
+    }
+    if (!trimmed.startsWith('/')) {
+      return p.posix.normalize(p.posix.join(normalizedHome, trimmed));
+    }
+    return p.posix.normalize(trimmed);
+  }
+
+  /// Streams chunks from [source] and invokes [writeChunk] with each chunk's
+  /// cumulative byte offset so multi-chunk SFTP uploads never overwrite offset 0.
+  static Future<int> uploadStreamWithOffsets({
+    required Stream<List<int>> source,
+    required Future<void> Function(Uint8List chunk, int offset) writeChunk,
+    bool Function()? isCancelled,
+    void Function(int uploadedBytes)? onProgress,
+  }) async {
+    var uploadedBytes = 0;
+    await for (final chunk in source) {
+      if (isCancelled?.call() ?? false) break;
+      if (chunk.isEmpty) continue;
+      final bytes = chunk is Uint8List ? chunk : Uint8List.fromList(chunk);
+      await writeChunk(bytes, uploadedBytes);
+      if (isCancelled?.call() ?? false) break;
+      uploadedBytes += bytes.length;
+      onProgress?.call(uploadedBytes);
+    }
+    return uploadedBytes;
   }
 }

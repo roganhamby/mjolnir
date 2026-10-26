@@ -44,7 +44,11 @@ class _ServerEditDialogState extends State<ServerEditDialog> {
     _portController = TextEditingController(text: s?.port.toString() ?? '22');
     _usernameController = TextEditingController(text: s?.username ?? 'root');
     _groupController = TextEditingController(text: s?.group ?? 'Default');
-    _remotePathController = TextEditingController(text: s?.defaultRemotePath ?? '/');
+    _remotePathController = TextEditingController(
+      text: (s != null && s.defaultRemotePath.trim().isNotEmpty)
+          ? s.defaultRemotePath
+          : '~/',
+    );
 
     _connectionType = s?.connectionType ?? ConnectionType.ssh;
     _authType = s?.authType ?? AuthType.password;
@@ -79,6 +83,10 @@ class _ServerEditDialogState extends State<ServerEditDialog> {
           : null,
     );
 
+    final enteredRemotePath = _remotePathController.text.trim();
+    final effectiveRemotePath = enteredRemotePath.isEmpty ? '~/' : enteredRemotePath;
+    final isCustomRemotePath = effectiveRemotePath != '~/' && effectiveRemotePath != '~';
+
     final server = ServerConfig(
       id: widget.initialServer?.id ?? const Uuid().v4(),
       name: _nameController.text.trim(),
@@ -86,9 +94,8 @@ class _ServerEditDialogState extends State<ServerEditDialog> {
       port: int.tryParse(_portController.text.trim()) ?? 22,
       username: _usernameController.text.trim(),
       group: _groupController.text.trim().isEmpty ? 'Default' : _groupController.text.trim(),
-      defaultRemotePath: _remotePathController.text.trim().isEmpty
-          ? '/'
-          : _remotePathController.text.trim(),
+      defaultRemotePath: effectiveRemotePath,
+      customRemotePathSet: isCustomRemotePath,
       connectionType: _connectionType,
       authType: _authType,
       terminalFontSize: widget.initialServer?.terminalFontSize ?? 13.0,
@@ -162,7 +169,16 @@ class _ServerEditDialogState extends State<ServerEditDialog> {
                 ),
                 TextFormField(
                   controller: _remotePathController,
-                  decoration: const InputDecoration(labelText: 'Default Remote Path'),
+                  decoration: InputDecoration(
+                    labelText: 'Default SFTP Directory',
+                    hintText: '~/',
+                    helperText: 'Defaults to ~/ (remote home). Specify an alternate path to override.',
+                    suffixIcon: IconButton(
+                      icon: const Icon(Icons.home_outlined, size: 18),
+                      tooltip: 'Reset to ~/ (home directory)',
+                      onPressed: () => setState(() => _remotePathController.text = '~/'),
+                    ),
+                  ),
                 ),
                 const SizedBox(height: 16),
                 const Text('Connection Default Type', style: TextStyle(fontWeight: FontWeight.bold)),

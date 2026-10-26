@@ -45,6 +45,7 @@ class ServerConfig {
   String username;
   String group;
   String defaultRemotePath;
+  bool customRemotePathSet;
   ConnectionType connectionType;
   AuthType authType;
   double terminalFontSize;
@@ -62,7 +63,8 @@ class ServerConfig {
     this.port = 22,
     required this.username,
     this.group = 'Default',
-    this.defaultRemotePath = '/',
+    this.defaultRemotePath = '~/',
+    this.customRemotePathSet = false,
     this.connectionType = ConnectionType.ssh,
     this.authType = AuthType.password,
     this.terminalFontSize = 13.0,
@@ -80,6 +82,7 @@ class ServerConfig {
         'username': username,
         'group': group,
         'default_remote_path': defaultRemotePath,
+        'custom_remote_path_set': customRemotePathSet,
         'connection_type': connectionType.name,
         'auth_type': authType.name,
         'terminal_font_size': terminalFontSize,
@@ -89,6 +92,15 @@ class ServerConfig {
       };
 
   factory ServerConfig.fromJson(Map<String, dynamic> json) {
+    final rawPath = (json['default_remote_path'] as String?)?.trim();
+    final customSet = json['custom_remote_path_set'] as bool? ??
+        (rawPath != null && rawPath.isNotEmpty && rawPath != '/' && rawPath != '~/');
+    final resolvedDefaultPath = (rawPath == null ||
+            rawPath.isEmpty ||
+            (rawPath == '/' && !customSet))
+        ? '~/'
+        : rawPath;
+
     return ServerConfig(
       id: json['id'] as String,
       name: json['name'] as String? ?? 'Untitled Server',
@@ -96,7 +108,8 @@ class ServerConfig {
       port: json['port'] as int? ?? 22,
       username: json['username'] as String? ?? 'root',
       group: json['group'] as String? ?? 'Default',
-      defaultRemotePath: json['default_remote_path'] as String? ?? '/',
+      defaultRemotePath: resolvedDefaultPath,
+      customRemotePathSet: customSet,
       connectionType: ConnectionType.values.firstWhere(
         (e) => e.name == json['connection_type'],
         orElse: () => ConnectionType.ssh,

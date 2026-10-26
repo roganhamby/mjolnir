@@ -359,6 +359,11 @@ class _MainScreenState extends State<MainScreen> {
 
   void _renameAndRecolorTab(TabItem tab) {
     final titleController = TextEditingController(text: tab.title);
+    final remotePathController = TextEditingController(
+      text: (tab.server != null && tab.server!.defaultRemotePath.trim().isNotEmpty)
+          ? tab.server!.defaultRemotePath.trim()
+          : '~/',
+    );
     Color? selectedColor = tab.color;
     String selectedTheme = tab.themeName;
 
@@ -401,6 +406,23 @@ class _MainScreenState extends State<MainScreen> {
                         setDialogState(() => selectedTheme = val);
                       }
                     },
+                  ),
+                ],
+                if (tab.type == 'sftp' && tab.server != null) ...[
+                  const SizedBox(height: 16),
+                  TextField(
+                    controller: remotePathController,
+                    decoration: InputDecoration(
+                      labelText: 'Default SFTP Directory',
+                      hintText: '~/',
+                      helperText: 'Defaults to ~/ (home). Specify an alternate default path to override.',
+                      border: const OutlineInputBorder(),
+                      suffixIcon: IconButton(
+                        icon: const Icon(Icons.home_outlined, size: 18),
+                        tooltip: 'Reset to ~/',
+                        onPressed: () => setDialogState(() => remotePathController.text = '~/'),
+                      ),
+                    ),
                   ),
                 ],
                 const SizedBox(height: 16),
@@ -452,9 +474,16 @@ class _MainScreenState extends State<MainScreen> {
                   tab.color = selectedColor;
                   tab.themeName = selectedTheme;
                 });
-                // Persist theme to server config
+                // Persist theme or default remote path to server config
                 if (tab.type == 'ssh' && tab.server != null) {
                   tab.server!.terminalTheme = selectedTheme;
+                  await _vaultManager.saveServer(tab.server!);
+                } else if (tab.type == 'sftp' && tab.server != null) {
+                  final entered = remotePathController.text.trim();
+                  final effectivePath = entered.isEmpty ? '~/' : entered;
+                  tab.server!.defaultRemotePath = effectivePath;
+                  tab.server!.customRemotePathSet =
+                      effectivePath != '~/' && effectivePath != '~';
                   await _vaultManager.saveServer(tab.server!);
                 }
                 if (context.mounted) Navigator.of(ctx).pop();
@@ -1824,6 +1853,13 @@ class _MainScreenState extends State<MainScreen> {
                   onUnassignTask: assignedTask != null
                       ? () => _assignTaskToTab(assignedTask, null)
                       : null,
+                  onDefaultRemotePathChanged: (newDefaultPath) async {
+                    server.defaultRemotePath = newDefaultPath;
+                    server.customRemotePathSet =
+                        newDefaultPath != '~/' && newDefaultPath != '~';
+                    await _vaultManager.saveServer(server);
+                    if (mounted) setState(() {});
+                  },
                 );
               }
             }).toList(),

@@ -364,5 +364,111 @@ void main() {
       final encodedSig = SshService.encodeSshSignature('ssh-rsa', sigBytes);
       expect(SSHSignature.getType(encodedSig.encode()), equals('ssh-rsa'));
     });
+
+    test('ServerConfig defaults SFTP remote path to ~/ and supports alternate defaults', () {
+      final defaultServer = ServerConfig(
+        id: 'srv-default',
+        name: 'Default Path Server',
+        host: 'example.com',
+        username: 'alice',
+      );
+      expect(defaultServer.defaultRemotePath, equals('~/'));
+
+      // Legacy server JSON with old hardcoded '/' default migrates to '~/'
+      final legacyServer = ServerConfig.fromJson({
+        'id': 'srv-legacy',
+        'name': 'Legacy Server',
+        'host': 'example.com',
+        'username': 'alice',
+        'default_remote_path': '/',
+      });
+      expect(legacyServer.defaultRemotePath, equals('~/'));
+
+      // Alternate default path is preserved across serialization
+      final customServer = ServerConfig(
+        id: 'srv-custom',
+        name: 'Custom Path Server',
+        host: 'example.com',
+        username: 'alice',
+        defaultRemotePath: '/var/www/html',
+        customRemotePathSet: true,
+      );
+      final restoredCustom = ServerConfig.fromJson(customServer.toJson());
+      expect(restoredCustom.defaultRemotePath, equals('/var/www/html'));
+      expect(restoredCustom.customRemotePathSet, isTrue);
+
+      // Explicitly configured '/' as an alternate default is preserved when customRemotePathSet is true
+      final explicitRoot = ServerConfig(
+        id: 'srv-root',
+        name: 'Explicit Root Server',
+        host: 'example.com',
+        username: 'root',
+        defaultRemotePath: '/',
+        customRemotePathSet: true,
+      );
+      final restoredRoot = ServerConfig.fromJson(explicitRoot.toJson());
+      expect(restoredRoot.defaultRemotePath, equals('/'));
+      expect(restoredRoot.customRemotePathSet, isTrue);
+    });
+
+    test('SshService.resolveRemotePath expands ~/ and relative paths against remote home', () {
+      const home = '/home/rogan';
+      expect(SshService.resolveRemotePath('~/', homePath: home), equals('/home/rogan'));
+      expect(SshService.resolveRemotePath('~', homePath: home), equals('/home/rogan'));
+      expect(SshService.resolveRemotePath('', homePath: home), equals('/home/rogan'));
+      expect(SshService.resolveRemotePath('.', homePath: home), equals('/home/rogan'));
+      expect(
+        SshService.resolveRemotePath('~/projects/mjolnir', homePath: home),
+        equals('/home/rogan/projects/mjolnir'),
+      );
+      expect(
+        SshService.resolveRemotePath('downloads', homePath: home),
+        equals('/home/rogan/downloads'),
+      );
+      expect(
+        SshService.resolveRemotePath('/var/www/app', homePath: home),
+        equals('/var/www/app'),
+      );
+      expect(
+        SshService.resolveRemotePath('/', homePath: home),
+        equals('/'),
+      );
+    });
+
+    test('SshService.uploadStreamWithOffsets writes multi-chunk streams at sequential offsets without corruption', () async {
+      // Simulate a 200 KB file split into multiple unequal chunks (like File.openRead)
+      final totalSize = 200 * 1024;
+      final expectedBytes = Uint8List(totalSize);
+      for (var i = 0; i < totalSize; i++) {
+        expectedBytes[i] = (i * 31 + 7) & 0xff;
+      }
+
+      final chunks = <List<int>>[
+        expectedBytes.sublist(0, 65536),
+        expectedBytes.sublist(65536, 131072),
+        expectedBytes.sublist(131072, 196608),
+        expectedBytes.sublist(196608, totalSize),
+      ];
+
+      final remoteBuffer = Uint8List(totalSize);
+      final recordedOffsets = <int>[];
+      var lastProgress = 0;
+
+      final totalUploaded = await SshService.uploadStreamWithOffsets(
+        source: Stream<List<int>>.fromIterable(chunks),
+        writeChunk: (chunk, offset) async {
+          recordedOffsets.add(offset);
+          remoteBuffer.setRange(offset, offset + chunk.length, chunk);
+        },
+        onProgress: (uploaded) {
+          lastProgress = uploaded;
+        },
+      );
+
+      expect(totalUploaded, equals(totalSize));
+      expect(lastProgress, equals(totalSize));
+      expect(recordedOffsets, equals([0, 65536, 131072, 196608]));
+      expect(remoteBuffer, equals(expectedBytes));
+    });
   });
 }

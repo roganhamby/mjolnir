@@ -92,6 +92,7 @@ class SftpTabWidget extends StatefulWidget {
   final TaskItem? assignedTask;
   final VoidCallback? onCompleteAssignedTask;
   final VoidCallback? onUnassignTask;
+  final ValueChanged<String>? onDefaultRemotePathChanged;
 
   const SftpTabWidget({
     super.key,
@@ -100,6 +101,7 @@ class SftpTabWidget extends StatefulWidget {
     this.assignedTask,
     this.onCompleteAssignedTask,
     this.onUnassignTask,
+    this.onDefaultRemotePathChanged,
   });
 
   @override
@@ -111,7 +113,8 @@ class _SftpTabWidgetState extends State<SftpTabWidget> {
   SftpSession? _sftpSession;
   bool _isRemoteLoading = true;
   String? _remoteErrorMessage;
-  String _currentRemotePath = '/';
+  String _remoteHomePath = '/';
+  String _currentRemotePath = '~/';
   List<SftpName> _remoteItems = [];
   bool _isExternalDraggingOverRemote = false;
 
@@ -134,9 +137,9 @@ class _SftpTabWidgetState extends State<SftpTabWidget> {
   @override
   void initState() {
     super.initState();
-    _currentRemotePath = widget.server.defaultRemotePath.isNotEmpty
-        ? widget.server.defaultRemotePath
-        : '/';
+    _currentRemotePath = widget.server.defaultRemotePath.trim().isNotEmpty
+        ? widget.server.defaultRemotePath.trim()
+        : '~/';
     _initLocalBrowser();
     _initSftp();
   }
@@ -337,7 +340,20 @@ class _SftpTabWidgetState extends State<SftpTabWidget> {
     try {
       final session = await widget.sshService.startSftpSession(widget.server);
       _sftpSession = session;
-      await _loadRemoteDirectory(_currentRemotePath);
+      try {
+        final realHome = await session.sftp.absolute('.');
+        if (realHome.trim().isNotEmpty) {
+          _remoteHomePath = realHome.trim();
+        }
+      } catch (_) {
+        _remoteHomePath = widget.server.username == 'root'
+            ? '/root'
+            : '/home/${widget.server.username}';
+      }
+      final configuredPath = widget.server.defaultRemotePath.trim().isNotEmpty
+          ? widget.server.defaultRemotePath.trim()
+          : '~/';
+      await _loadRemoteDirectory(configuredPath);
     } catch (e) {
       if (mounted) {
         setState(() {
@@ -350,13 +366,17 @@ class _SftpTabWidgetState extends State<SftpTabWidget> {
 
   Future<void> _loadRemoteDirectory(String path) async {
     if (_sftpSession == null) return;
+    final resolvedPath = SshService.resolveRemotePath(
+      path,
+      homePath: _remoteHomePath,
+    );
     setState(() {
       _isRemoteLoading = true;
       _remoteErrorMessage = null;
     });
 
     try {
-      final rawItems = await _sftpSession!.sftp.listdir(path);
+      final rawItems = await _sftpSession!.sftp.listdir(resolvedPath);
       final items = rawItems
           .where((item) => item.filename != '.' && item.filename != '..')
           .toList();
@@ -371,7 +391,7 @@ class _SftpTabWidgetState extends State<SftpTabWidget> {
 
       if (mounted) {
         setState(() {
-          _currentRemotePath = path;
+          _currentRemotePath = resolvedPath;
           _remoteItems = items;
           _isRemoteLoading = false;
         });
@@ -379,8 +399,9 @@ class _SftpTabWidgetState extends State<SftpTabWidget> {
     } catch (e) {
       if (mounted) {
         setState(() {
+          _currentRemotePath = resolvedPath;
           _isRemoteLoading = false;
-          _remoteErrorMessage = 'Failed to list directory: $e';
+          _remoteErrorMessage = 'Failed to list directory "$resolvedPath": $e';
         });
       }
     }
@@ -390,6 +411,103 @@ class _SftpTabWidgetState extends State<SftpTabWidget> {
     if (_currentRemotePath == '/' || _currentRemotePath.isEmpty) return;
     final parent = p.posix.dirname(_currentRemotePath);
     await _loadRemoteDirectory(parent.isEmpty ? '/' : parent);
+  }
+
+  Future<void> _showRemotePathDialog() async {
+    final navController = TextEditingController(text: _currentRemotePath);
+    final defaultController = TextEditingController(
+      text: widget.server.defaultRemotePath.trim().isNotEmpty
+          ? widget.server.defaultRemotePath.trim()
+          : '~/',
+    );
+
+    await showDialog<void>(
+      context: context,
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setDialogState) => AlertDialog(
+          title: const Text('Remote SFTP Directory'),
+          content: SizedBox(
+            width: 440,
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                TextField(
+                  controller: navController,
+                  autofocus: true,
+                  decoration: InputDecoration(
+                    labelText: 'Go to Remote Path',
+                    hintText: '~/ or /path/to/dir',
+                    border: const OutlineInputBorder(),
+                    suffixIcon: IconButton(
+                      icon: const Icon(Icons.home_outlined, size: 18),
+                      tooltip: 'Set to ~/ ($_remoteHomePath)',
+                      onPressed: () => setDialogState(() => navController.text = '~/'),
+                    ),
+                  ),
+                  onSubmitted: (val) {
+                    Navigator.of(ctx).pop();
+                    if (val.trim().isNotEmpty) {
+                      _loadRemoteDirectory(val.trim());
+                    }
+                  },
+                ),
+                const SizedBox(height: 16),
+                TextField(
+                  controller: defaultController,
+                  decoration: InputDecoration(
+                    labelText: 'Default Remote Path for ${widget.server.name}',
+                    hintText: '~/',
+                    helperText: 'Defaults to ~/ (home). Specify an alternate default path to override.',
+                    border: const OutlineInputBorder(),
+                    suffixIcon: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        IconButton(
+                          icon: const Icon(Icons.my_location, size: 18),
+                          tooltip: 'Use current directory ($_currentRemotePath)',
+                          onPressed: () =>
+                              setDialogState(() => defaultController.text = _currentRemotePath),
+                        ),
+                        IconButton(
+                          icon: const Icon(Icons.home_outlined, size: 18),
+                          tooltip: 'Reset default to ~/',
+                          onPressed: () => setDialogState(() => defaultController.text = '~/'),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(ctx).pop(),
+              child: const Text('Cancel'),
+            ),
+            ElevatedButton(
+              onPressed: () {
+                final newDefaultRaw = defaultController.text.trim();
+                final effectiveDefault = newDefaultRaw.isEmpty ? '~/' : newDefaultRaw;
+                if (effectiveDefault != widget.server.defaultRemotePath) {
+                  widget.server.defaultRemotePath = effectiveDefault;
+                  widget.server.customRemotePathSet =
+                      effectiveDefault != '~/' && effectiveDefault != '~';
+                  widget.onDefaultRemotePathChanged?.call(effectiveDefault);
+                }
+                final targetNav = navController.text.trim();
+                Navigator.of(ctx).pop();
+                if (targetNav.isNotEmpty) {
+                  _loadRemoteDirectory(targetNav);
+                }
+              },
+              child: const Text('Apply'),
+            ),
+          ],
+        ),
+      ),
+    );
   }
 
   Future<String?> _promptFolderName(String title) async {
@@ -708,20 +826,21 @@ class _SftpTabWidgetState extends State<SftpTabWidget> {
 
     try {
       final totalBytes = await localFile.length();
-      var uploadedBytes = 0;
-      final readStream = localFile.openRead();
-
-      await for (final chunk in readStream) {
-        if (job.isCancelled) break;
-        await remoteFile.write(Stream.value(Uint8List.fromList(chunk)));
-        if (job.isCancelled) break;
-        uploadedBytes += chunk.length;
-        if (mounted && totalBytes > 0) {
-          setState(() {
-            _transferProgress = (uploadedBytes / totalBytes).clamp(0.0, 1.0);
-          });
-        }
-      }
+      await SshService.uploadStreamWithOffsets(
+        source: localFile.openRead(),
+        isCancelled: () => job.isCancelled,
+        writeChunk: (bytes, offset) => remoteFile.writeBytes(
+          bytes,
+          offset: offset,
+        ),
+        onProgress: (uploadedBytes) {
+          if (mounted && totalBytes > 0) {
+            setState(() {
+              _transferProgress = (uploadedBytes / totalBytes).clamp(0.0, 1.0);
+            });
+          }
+        },
+      );
     } finally {
       await remoteFile.close();
     }
@@ -788,13 +907,14 @@ class _SftpTabWidgetState extends State<SftpTabWidget> {
 
     final remoteFile = await _sftpSession!.sftp.open(remotePath);
     final localFile = File(localDestPath);
-    IOSink? fileSink = localFile.openWrite();
+    RandomAccessFile? raf;
 
     try {
+      raf = await localFile.open(mode: FileMode.write);
       var downloadedBytes = 0;
       await for (final chunk in remoteFile.read()) {
         if (job.isCancelled) break;
-        fileSink.add(chunk);
+        await raf.writeFrom(chunk);
         downloadedBytes += chunk.length;
         if (mounted && totalBytes > 0) {
           setState(() {
@@ -803,11 +923,11 @@ class _SftpTabWidgetState extends State<SftpTabWidget> {
         }
       }
 
-      await fileSink.flush();
-      await fileSink.close();
-      fileSink = null;
+      await raf.flush();
+      await raf.close();
+      raf = null;
     } finally {
-      await fileSink?.close();
+      await raf?.close();
       await remoteFile.close();
     }
 
@@ -940,7 +1060,7 @@ class _SftpTabWidgetState extends State<SftpTabWidget> {
     }
 
     final remoteFile = await _sftpSession!.sftp.open(remoteSrc);
-    final builder = BytesBuilder(copy: false);
+    final builder = BytesBuilder();
 
     try {
       final stream = remoteFile.read();
@@ -1355,26 +1475,42 @@ class _SftpTabWidgetState extends State<SftpTabWidget> {
                 onPressed: _currentRemotePath != '/' ? _navigateRemoteUp : null,
               ),
               IconButton(
+                icon: const Icon(Icons.home_outlined, size: 18),
+                tooltip: 'Go to Home (~/)',
+                visualDensity: VisualDensity.compact,
+                onPressed: _sftpSession != null ? () => _loadRemoteDirectory('~/') : null,
+              ),
+              IconButton(
                 icon: const Icon(Icons.refresh, size: 18),
                 tooltip: 'Refresh remote directory',
                 visualDensity: VisualDensity.compact,
                 onPressed: () => _loadRemoteDirectory(_currentRemotePath),
               ),
               Expanded(
-                child: Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 5),
-                  decoration: BoxDecoration(
-                    color: colorScheme.surface,
-                    borderRadius: BorderRadius.circular(4),
-                  ),
-                  child: Text(
-                    _currentRemotePath,
-                    style: const TextStyle(fontFamily: 'monospace', fontSize: 12),
-                    overflow: TextOverflow.ellipsis,
+                child: InkWell(
+                  onTap: _sftpSession != null ? _showRemotePathDialog : null,
+                  borderRadius: BorderRadius.circular(4),
+                  child: Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 5),
+                    decoration: BoxDecoration(
+                      color: colorScheme.surface,
+                      borderRadius: BorderRadius.circular(4),
+                    ),
+                    child: Text(
+                      _currentRemotePath,
+                      style: const TextStyle(fontFamily: 'monospace', fontSize: 12),
+                      overflow: TextOverflow.ellipsis,
+                    ),
                   ),
                 ),
               ),
               const SizedBox(width: 4),
+              IconButton(
+                icon: const Icon(Icons.edit_location_alt_outlined, size: 18),
+                tooltip: 'Go to Remote Path / Set Default Directory...',
+                visualDensity: VisualDensity.compact,
+                onPressed: _sftpSession != null ? _showRemotePathDialog : null,
+              ),
               IconButton(
                 icon: const Icon(Icons.create_new_folder_outlined, size: 18),
                 tooltip: 'New Remote Folder',
@@ -1438,9 +1574,22 @@ class _SftpTabWidgetState extends State<SftpTabWidget> {
                               const SizedBox(height: 8),
                               Text(_remoteErrorMessage!, textAlign: TextAlign.center),
                               const SizedBox(height: 12),
-                              ElevatedButton(
-                                onPressed: _initSftp,
-                                child: const Text('Retry Connection'),
+                              Wrap(
+                                spacing: 10,
+                                runSpacing: 8,
+                                alignment: WrapAlignment.center,
+                                children: [
+                                  ElevatedButton(
+                                    onPressed: _initSftp,
+                                    child: const Text('Retry Connection'),
+                                  ),
+                                  if (_sftpSession != null)
+                                    OutlinedButton.icon(
+                                      icon: const Icon(Icons.home_outlined, size: 16),
+                                      label: const Text('Go to Home (~/)'),
+                                      onPressed: () => _loadRemoteDirectory('~/'),
+                                    ),
+                                ],
                               ),
                             ],
                           ),
