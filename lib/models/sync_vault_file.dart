@@ -9,6 +9,7 @@ class SyncVaultFile {
   String appId;
   DateTime updatedAt;
   String salt;
+  Map<String, dynamic>? encryptedDropboxConfig;
   List<ServerConfig> servers;
   List<TaskItem> tasks;
   List<StoredStringItem> storedStrings;
@@ -18,6 +19,7 @@ class SyncVaultFile {
     this.appId = 'com.serversync.mjolnir',
     DateTime? updatedAt,
     required this.salt,
+    this.encryptedDropboxConfig,
     List<ServerConfig>? servers,
     List<TaskItem>? tasks,
     List<StoredStringItem>? storedStrings,
@@ -46,6 +48,8 @@ class SyncVaultFile {
           'iterations': 3,
           'memory_kb': 65536,
         },
+        if (encryptedDropboxConfig != null)
+          'encrypted_dropbox_config': encryptedDropboxConfig,
         'servers': servers.map((s) => s.toJson()).toList(),
         'tasks': tasks.map((t) => t.toJson()).toList(),
         'stored_strings': storedStrings.map((s) => s.toJson()).toList(),
@@ -70,6 +74,8 @@ class SyncVaultFile {
           ? DateTime.tryParse(json['updated_at'] as String)?.toUtc() ?? DateTime.now().toUtc()
           : DateTime.now().toUtc(),
       salt: cryptoParams['salt'] as String? ?? CryptoVaultService.generateRandomSalt(),
+      encryptedDropboxConfig:
+          json['encrypted_dropbox_config'] as Map<String, dynamic>?,
       servers: serverList,
       tasks: taskList,
       storedStrings: stringList,
@@ -133,6 +139,12 @@ class SyncVaultFile {
       }
     }
 
+    if (remoteVault.encryptedDropboxConfig != null &&
+        (encryptedDropboxConfig == null ||
+            remoteVault.updatedAt.isAfter(updatedAt))) {
+      encryptedDropboxConfig = remoteVault.encryptedDropboxConfig;
+    }
+
     updatedAt = DateTime.now().toUtc();
   }
 
@@ -146,7 +158,8 @@ class SyncVaultFile {
     if (!baselineExistedOnDisk &&
         (candidate.servers.isNotEmpty ||
             candidate.tasks.isNotEmpty ||
-            candidate.storedStrings.isNotEmpty)) {
+            candidate.storedStrings.isNotEmpty ||
+            candidate.encryptedDropboxConfig != null)) {
       return true;
     }
     final effectiveCandidateTime = candidateModifiedAt != null &&

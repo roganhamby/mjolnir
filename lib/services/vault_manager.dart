@@ -50,7 +50,8 @@ class VaultManager with ChangeNotifier {
             final localHasData = localExisted &&
                 (activeVault.servers.isNotEmpty ||
                     activeVault.tasks.isNotEmpty ||
-                    activeVault.storedStrings.isNotEmpty);
+                    activeVault.storedStrings.isNotEmpty ||
+                    activeVault.encryptedDropboxConfig != null);
             if (SyncVaultFile.isNewerVault(
               remoteNewest.vault,
               activeVault,
@@ -76,9 +77,39 @@ class VaultManager with ChangeNotifier {
     }
   }
 
+  /// Encrypts the current Dropbox API credentials into the vault if unlocked and configured.
+  Future<void> _syncDropboxConfigToVault() async {
+    if (!_isUnlocked || _masterKey == null || _vault == null) return;
+    if (dropboxService.config.isConfigured) {
+      _vault!.encryptedDropboxConfig = await cryptoService.encryptPayload(
+        payload: dropboxService.config.toJson(),
+        masterKey: _masterKey!,
+      );
+    }
+  }
+
+  /// Saves Dropbox API configuration and encrypts it into the vault if unlocked.
+  Future<void> saveDropboxConfig(DropboxConfig newConfig) async {
+    await dropboxService.saveConfig(newConfig);
+    if (_isUnlocked && _masterKey != null && _vault != null) {
+      if (newConfig.isConfigured) {
+        _vault!.encryptedDropboxConfig = await cryptoService.encryptPayload(
+          payload: newConfig.toJson(),
+          masterKey: _masterKey!,
+        );
+      } else {
+        _vault!.encryptedDropboxConfig = null;
+      }
+      _vault!.updatedAt = DateTime.now().toUtc();
+      await storageProvider.saveVault(_vault!);
+      notifyListeners();
+    }
+  }
+
   /// Saves the vault locally and, if Dropbox auto-sync is enabled, uploads to `/App/Mjolnir/servers.json`.
   Future<void> _persistVault() async {
     if (_vault == null) return;
+    await _syncDropboxConfigToVault();
     await storageProvider.saveVault(_vault!);
     if (dropboxService.config.isConfigured &&
         dropboxService.config.autoSyncOnLoadAndSave) {
@@ -94,7 +125,7 @@ class VaultManager with ChangeNotifier {
   }
 
   /// Unlocks the vault using the given master password.
-  /// Derives the key and decrypts in-memory server credentials.
+  /// Derives the key and decrypts in-memory server credentials and Dropbox API credentials.
   Future<bool> unlock(String masterPassword) async {
     if (_vault == null) await init();
     if (_vault == null) return false;
@@ -117,8 +148,32 @@ class VaultManager with ChangeNotifier {
         }
       }
 
+      if (_vault!.encryptedDropboxConfig != null) {
+        try {
+          final decryptedDropboxMap = await cryptoService.decryptPayload(
+            encryptedData: _vault!.encryptedDropboxConfig!,
+            masterKey: key,
+          );
+          final vaultDropbox = DropboxConfig.fromJson(decryptedDropboxMap);
+          if (!dropboxService.config.isConfigured && vaultDropbox.isConfigured) {
+            await dropboxService.saveConfig(vaultDropbox);
+          }
+        } catch (e) {
+          _masterKey = null;
+          _errorMessage = 'Invalid master password or corrupted credential payload.';
+          notifyListeners();
+          return false;
+        }
+      }
+
       _isUnlocked = true;
       _errorMessage = null;
+
+      if (dropboxService.config.isConfigured) {
+        await _syncDropboxConfigToVault();
+        await storageProvider.saveVault(_vault!);
+      }
+
       notifyListeners();
       return true;
     } catch (e) {
