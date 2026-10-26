@@ -2,6 +2,7 @@ import 'dart:io';
 import 'dart:typed_data';
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:dartssh2/dartssh2.dart';
 import 'package:file_picker/file_picker.dart';
 import 'package:desktop_drop/desktop_drop.dart';
@@ -18,7 +19,7 @@ class _TransferCancelledException implements Exception {
   const _TransferCancelledException();
 }
 
-enum _TransferType { upload, downloadToLocal, downloadSaveAs }
+enum _TransferType { upload, downloadToLocal, downloadSaveAs, downloadOpenExternal }
 
 class _TransferJob {
   final int id;
@@ -48,6 +49,8 @@ class _TransferJob {
         return 'Download "$name" → $targetDir';
       case _TransferType.downloadSaveAs:
         return 'Download "$name" (Save As)';
+      case _TransferType.downloadOpenExternal:
+        return 'Open "$name" in External Text Editor';
     }
   }
 }
@@ -622,6 +625,24 @@ class _SftpTabWidgetState extends State<SftpTabWidget> {
     _processTransferQueue();
   }
 
+  void _enqueueDownloadAndOpenExternal(SftpName item) {
+    if (_sftpSession == null || item.attr.isDirectory) return;
+    final remoteSrc = p.posix.join(_currentRemotePath, item.filename);
+    final job = _TransferJob(
+      id: ++_nextTransferId,
+      type: _TransferType.downloadOpenExternal,
+      name: item.filename,
+      sourcePath: remoteSrc,
+      targetDir: _currentLocalPath.isNotEmpty ? _currentLocalPath : null,
+      isDirectory: false,
+      size: item.attr.size,
+    );
+    setState(() {
+      _transferQueue.add(job);
+    });
+    _processTransferQueue();
+  }
+
   void _cancelActiveTransfer() {
     if (_activeTransfer == null) return;
     setState(() {
@@ -758,6 +779,32 @@ class _SftpTabWidgetState extends State<SftpTabWidget> {
             ScaffoldMessenger.of(context).showSnackBar(
               SnackBar(
                 content: Text('Download failed for ${job.name}: $e'),
+                backgroundColor: Colors.red,
+              ),
+            );
+          }
+        }
+        break;
+
+      case _TransferType.downloadOpenExternal:
+        try {
+          final localFilePath = await _downloadRemoteFileForExternalEditor(job);
+          if (_currentLocalPath.isNotEmpty &&
+              p.equals(p.dirname(localFilePath), _currentLocalPath)) {
+            await _loadLocalDirectory(_currentLocalPath);
+          }
+          await _openLocalFileInExternalEditor(localFilePath);
+        } on _TransferCancelledException {
+          if (mounted) {
+            ScaffoldMessenger.of(context).showSnackBar(
+              SnackBar(content: Text('Cancelled opening "${job.name}"')),
+            );
+          }
+        } catch (e) {
+          if (mounted) {
+            ScaffoldMessenger.of(context).showSnackBar(
+              SnackBar(
+                content: Text('Failed to open ${job.name}: $e'),
                 backgroundColor: Colors.red,
               ),
             );
@@ -1101,6 +1148,134 @@ class _SftpTabWidgetState extends State<SftpTabWidget> {
     }
   }
 
+  static const MethodChannel _fileOpenerChannel =
+      MethodChannel('com.mjolnir.app/file_opener');
+
+  /// Downloads a remote file one-way to a local path (preferring [job.targetDir]
+  /// if writable, falling back to a temporary directory) so it can be opened
+  /// in an external text editor where any saves stay strictly local.
+  Future<String> _downloadRemoteFileForExternalEditor(_TransferJob job) async {
+    if (_sftpSession == null) {
+      throw StateError('No active SFTP session');
+    }
+    if (job.isCancelled) throw const _TransferCancelledException();
+
+    File? localFile;
+    RandomAccessFile? raf;
+
+    if (job.targetDir != null && job.targetDir!.isNotEmpty) {
+      try {
+        final candidate = File(p.join(job.targetDir!, job.name));
+        raf = await candidate.open(mode: FileMode.write);
+        localFile = candidate;
+      } catch (_) {
+        raf = null;
+        localFile = null;
+      }
+    }
+
+    if (localFile == null || raf == null) {
+      final tempDir = await getTemporaryDirectory();
+      final previewDir = Directory(p.join(tempDir.path, 'mjolnir_sftp'));
+      if (!await previewDir.exists()) {
+        await previewDir.create(recursive: true);
+      }
+      localFile = File(p.join(previewDir.path, job.name));
+      raf = await localFile.open(mode: FileMode.write);
+    }
+
+    final totalBytes = job.size ?? 0;
+    if (mounted) {
+      setState(() {
+        _transferStatus = 'Downloading ${job.name} to open in editor...';
+        _transferProgress = totalBytes > 0 ? 0.0 : null;
+      });
+    }
+
+    final remoteFile = await _sftpSession!.sftp.open(job.sourcePath);
+    try {
+      var downloadedBytes = 0;
+      await for (final chunk in remoteFile.read()) {
+        if (job.isCancelled) break;
+        await raf.writeFrom(chunk);
+        downloadedBytes += chunk.length;
+        if (mounted && totalBytes > 0) {
+          setState(() {
+            _transferProgress = (downloadedBytes / totalBytes).clamp(0.0, 1.0);
+          });
+        }
+      }
+      await raf.flush();
+      await raf.close();
+      raf = null;
+    } finally {
+      await raf?.close();
+      await remoteFile.close();
+    }
+
+    if (job.isCancelled) {
+      try {
+        if (await localFile.exists()) {
+          await localFile.delete();
+        }
+      } catch (_) {}
+      throw const _TransferCancelledException();
+    }
+
+    return localFile.path;
+  }
+
+  /// Opens [localFilePath] in the system's external text editor.
+  /// Any modifications saved in the editor remain local and are not uploaded back.
+  Future<void> _openLocalFileInExternalEditor(String localFilePath) async {
+    try {
+      if (Platform.isMacOS) {
+        try {
+          await _fileOpenerChannel.invokeMethod<bool>(
+            'openInTextEditor',
+            {'path': localFilePath},
+          );
+        } on MissingPluginException {
+          final result = await Process.run('open', ['-t', localFilePath]);
+          if (result.exitCode != 0) {
+            throw Exception(result.stderr.toString().trim());
+          }
+        }
+      } else if (Platform.isWindows) {
+        await Process.start(
+          'notepad.exe',
+          [localFilePath],
+          mode: ProcessStartMode.detached,
+        );
+      } else if (Platform.isLinux) {
+        await Process.start(
+          'xdg-open',
+          [localFilePath],
+          mode: ProcessStartMode.detached,
+        );
+      } else {
+        throw UnsupportedError('External text editor launch is only supported on desktop platforms.');
+      }
+
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Opened in external text editor (local copy: $localFilePath)'),
+          ),
+        );
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Failed to open in external editor: $e'),
+            backgroundColor: Colors.red,
+          ),
+        );
+      }
+    }
+  }
+
   void _showLocalContextMenu(BuildContext context, Offset globalPos, _LocalFileEntry entry) {
     final overlay = Overlay.of(context).context.findRenderObject() as RenderBox;
 
@@ -1111,6 +1286,17 @@ class _SftpTabWidgetState extends State<SftpTabWidget> {
         Offset.zero & overlay.size,
       ),
       items: [
+        if (!entry.isDirectory)
+          const PopupMenuItem(
+            value: 'open_editor',
+            child: Row(
+              children: [
+                Icon(Icons.open_in_new, size: 16),
+                SizedBox(width: 8),
+                Text('Open in External Text Editor'),
+              ],
+            ),
+          ),
         PopupMenuItem(
           value: 'upload',
           child: Row(
@@ -1133,6 +1319,7 @@ class _SftpTabWidgetState extends State<SftpTabWidget> {
         ),
       ],
     ).then((choice) {
+      if (choice == 'open_editor') _openLocalFileInExternalEditor(entry.path);
       if (choice == 'upload') _enqueueUpload(entry.path);
       if (choice == 'delete') _deleteLocalEntry(entry);
     });
@@ -1150,6 +1337,17 @@ class _SftpTabWidgetState extends State<SftpTabWidget> {
         Offset.zero & overlay.size,
       ),
       items: [
+        if (!isDir)
+          const PopupMenuItem(
+            value: 'open_editor',
+            child: Row(
+              children: [
+                Icon(Icons.open_in_new, size: 16),
+                SizedBox(width: 8),
+                Text('Open in External Text Editor'),
+              ],
+            ),
+          ),
         PopupMenuItem(
           value: 'download_local_pane',
           child: Row(
@@ -1183,6 +1381,7 @@ class _SftpTabWidgetState extends State<SftpTabWidget> {
         ),
       ],
     ).then((choice) {
+      if (choice == 'open_editor') _enqueueDownloadAndOpenExternal(item);
       if (choice == 'download_local_pane') {
         _enqueueDownloadToLocal(
           remotePath: remotePath,
@@ -1392,6 +1591,8 @@ class _SftpTabWidgetState extends State<SftpTabWidget> {
                                 onTap: () {
                                   if (entry.isDirectory) {
                                     _loadLocalDirectory(entry.path);
+                                  } else {
+                                    _openLocalFileInExternalEditor(entry.path);
                                   }
                                 },
                                 onPrimaryAction: () => _enqueueUpload(entry.path),
@@ -1645,15 +1846,8 @@ class _SftpTabWidgetState extends State<SftpTabWidget> {
                                 onTap: () {
                                   if (isDir) {
                                     _loadRemoteDirectory(remoteItemPath);
-                                  } else if (_showLocalPane && _currentLocalPath.isNotEmpty) {
-                                    _enqueueDownloadToLocal(
-                                      remotePath: remoteItemPath,
-                                      name: item.filename,
-                                      isDirectory: false,
-                                      size: item.attr.size,
-                                    );
                                   } else {
-                                    _enqueueDownloadSaveAs(item);
+                                    _enqueueDownloadAndOpenExternal(item);
                                   }
                                 },
                                 onPrimaryAction: () {
