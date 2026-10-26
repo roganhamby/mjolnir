@@ -26,6 +26,7 @@ class TerminalTabWidget extends StatefulWidget {
   final TaskItem? assignedTask;
   final VoidCallback? onCompleteAssignedTask;
   final VoidCallback? onUnassignTask;
+  final ValueChanged<TaskItem>? onAssignedTaskChanged;
   final VoidCallback? onClose;
   final Function(double newFontSize)? onFontSizeChanged;
   final Function(String newThemeName)? onThemeChanged;
@@ -41,6 +42,7 @@ class TerminalTabWidget extends StatefulWidget {
     this.assignedTask,
     this.onCompleteAssignedTask,
     this.onUnassignTask,
+    this.onAssignedTaskChanged,
     this.onClose,
     this.onFontSizeChanged,
     this.onThemeChanged,
@@ -1399,6 +1401,10 @@ Total Characters Logged: $_screenLogBytesWritten
                       },
                       onUnassignTask: () {
                         widget.onUnassignTask?.call();
+                        _requestTerminalFocus();
+                      },
+                      onTaskChanged: (updatedTask) {
+                        widget.onAssignedTaskChanged?.call(updatedTask);
                         _requestTerminalFocus();
                       },
                     ),

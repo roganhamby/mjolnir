@@ -1738,6 +1738,20 @@ class _MainScreenState extends State<MainScreen> {
                                         overflow: TextOverflow.ellipsis,
                                       ),
                                     ),
+                                    if (assignedTask.subtasks.isNotEmpty) ...[
+                                      const SizedBox(width: 5),
+                                      Text(
+                                        '(${assignedTask.completedSubtaskCount}/${assignedTask.subtasks.length})',
+                                        style: TextStyle(
+                                          fontSize: 10,
+                                          fontWeight: FontWeight.w600,
+                                          color: assignedTask.completedSubtaskCount ==
+                                                  assignedTask.subtasks.length
+                                              ? Colors.greenAccent
+                                              : scheme.mutedText,
+                                        ),
+                                      ),
+                                    ],
                                     if (assignedTask.dueDate != null) ...[
                                       const SizedBox(width: 5),
                                       Text(
@@ -1828,6 +1842,10 @@ class _MainScreenState extends State<MainScreen> {
                   onUnassignTask: assignedTask != null
                       ? () => _assignTaskToTab(assignedTask, null)
                       : null,
+                  onAssignedTaskChanged: (updatedTask) async {
+                    await _vaultManager.saveTask(updatedTask);
+                    if (mounted) setState(() {});
+                  },
                   onFontSizeChanged: (newSize) async {
                     t.fontSize = newSize;
                     server.terminalFontSize = newSize;
@@ -1853,6 +1871,10 @@ class _MainScreenState extends State<MainScreen> {
                   onUnassignTask: assignedTask != null
                       ? () => _assignTaskToTab(assignedTask, null)
                       : null,
+                  onAssignedTaskChanged: (updatedTask) async {
+                    await _vaultManager.saveTask(updatedTask);
+                    if (mounted) setState(() {});
+                  },
                   onDefaultRemotePathChanged: (newDefaultPath) async {
                     server.defaultRemotePath = newDefaultPath;
                     server.customRemotePathSet =

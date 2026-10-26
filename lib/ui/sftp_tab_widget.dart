@@ -95,6 +95,7 @@ class SftpTabWidget extends StatefulWidget {
   final TaskItem? assignedTask;
   final VoidCallback? onCompleteAssignedTask;
   final VoidCallback? onUnassignTask;
+  final ValueChanged<TaskItem>? onAssignedTaskChanged;
   final ValueChanged<String>? onDefaultRemotePathChanged;
 
   const SftpTabWidget({
@@ -104,6 +105,7 @@ class SftpTabWidget extends StatefulWidget {
     this.assignedTask,
     this.onCompleteAssignedTask,
     this.onUnassignTask,
+    this.onAssignedTaskChanged,
     this.onDefaultRemotePathChanged,
   });
 
@@ -2054,6 +2056,7 @@ class _SftpTabWidgetState extends State<SftpTabWidget> {
               task: widget.assignedTask!,
               onCompleteTask: () => widget.onCompleteAssignedTask?.call(),
               onUnassignTask: () => widget.onUnassignTask?.call(),
+              onTaskChanged: (updatedTask) => widget.onAssignedTaskChanged?.call(updatedTask),
             ),
           ),
 

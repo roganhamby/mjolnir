@@ -184,7 +184,7 @@ void main() {
       expect(s1.name, equals('Server 1 v2 (Updated remotely)'));
     });
 
-    test('TaskItem serialization, importance levels, and due date overdue check', () {
+    test('TaskItem serialization, importance levels, subtasks, and due date overdue check', () {
       final pastDue = DateTime.now().subtract(const Duration(minutes: 5));
       final futureDue = DateTime.now().add(const Duration(minutes: 30));
 
@@ -193,6 +193,10 @@ void main() {
         title: 'Rotate SSH keys',
         importance: TaskImportance.priority,
         dueDate: pastDue,
+        subtasks: [
+          SubTaskItem(id: 'sub1', title: 'Generate new Ed25519 keypair', isCompleted: true),
+          SubTaskItem(id: 'sub2', title: 'Deploy to authorized_keys', isCompleted: false),
+        ],
       );
       final upcomingTask = TaskItem(
         id: 't2',
@@ -202,7 +206,9 @@ void main() {
       );
 
       expect(overdueTask.isOverdue, isTrue);
+      expect(overdueTask.completedSubtaskCount, equals(1));
       expect(upcomingTask.isOverdue, isFalse);
+      expect(upcomingTask.completedSubtaskCount, equals(0));
 
       final vault = SyncVaultFile(
         salt: salt,
@@ -213,6 +219,12 @@ void main() {
       expect(restored.tasks.length, equals(2));
       expect(restored.tasks.first.importance, equals(TaskImportance.priority));
       expect(restored.tasks.first.title, equals('Rotate SSH keys'));
+      expect(restored.tasks.first.subtasks.length, equals(2));
+      expect(restored.tasks.first.completedSubtaskCount, equals(1));
+      expect(restored.tasks.first.subtasks[0].title, equals('Generate new Ed25519 keypair'));
+      expect(restored.tasks.first.subtasks[0].isCompleted, isTrue);
+      expect(restored.tasks.first.subtasks[1].title, equals('Deploy to authorized_keys'));
+      expect(restored.tasks.first.subtasks[1].isCompleted, isFalse);
     });
 
     test('StoredStringItem serialization, JSON export, and import merge', () async {
