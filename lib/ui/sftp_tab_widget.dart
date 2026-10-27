@@ -281,28 +281,38 @@ class _SftpTabWidgetState extends State<SftpTabWidget> {
 
   Future<void> _createLocalFolder() async {
     if (_currentLocalPath.isEmpty) return;
-    final folderName = await _promptFolderName('New Local Folder');
+    final folderName = await _promptFolderName('Make Local Directory');
     if (folderName == null || folderName.isEmpty) return;
 
     try {
       final newDir = Directory(p.join(_currentLocalPath, folderName));
       await newDir.create(recursive: true);
       await _loadLocalDirectory(_currentLocalPath);
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Created local directory "$folderName"')),
+        );
+      }
     } catch (e) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Failed to create local folder: $e'), backgroundColor: Colors.red),
+          SnackBar(content: Text('Failed to create local directory: $e'), backgroundColor: Colors.red),
         );
       }
     }
   }
 
   Future<void> _deleteLocalEntry(_LocalFileEntry entry) async {
+    final isDir = entry.isDirectory;
     final confirm = await showDialog<bool>(
       context: context,
       builder: (ctx) => AlertDialog(
-        title: Text(entry.isDirectory ? 'Delete Local Folder' : 'Delete Local File'),
-        content: Text('Are you sure you want to delete "${entry.name}" from your computer?'),
+        title: Text(isDir ? 'Remove Local Directory' : 'Delete Local File'),
+        content: Text(
+          isDir
+              ? 'Are you sure you want to remove local directory "${entry.name}" and its contents?'
+              : 'Are you sure you want to delete local file "${entry.name}"?',
+        ),
         actions: [
           TextButton(
             onPressed: () => Navigator.of(ctx).pop(false),
@@ -311,7 +321,7 @@ class _SftpTabWidgetState extends State<SftpTabWidget> {
           ElevatedButton(
             style: ElevatedButton.styleFrom(backgroundColor: Colors.red),
             onPressed: () => Navigator.of(ctx).pop(true),
-            child: const Text('Delete'),
+            child: Text(isDir ? 'Remove Directory' : 'Delete File'),
           ),
         ],
       ),
@@ -323,16 +333,133 @@ class _SftpTabWidgetState extends State<SftpTabWidget> {
       await entry.entity.delete(recursive: true);
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Deleted local "${entry.name}"')),
+          SnackBar(
+            content: Text(
+              isDir
+                  ? 'Removed local directory "${entry.name}"'
+                  : 'Deleted local file "${entry.name}"',
+            ),
+          ),
         );
       }
       await _loadLocalDirectory(_currentLocalPath);
     } catch (e) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Failed to delete local item: $e'), backgroundColor: Colors.red),
+          SnackBar(
+            content: Text(
+              isDir
+                  ? 'Failed to remove local directory: $e'
+                  : 'Failed to delete local file: $e',
+            ),
+            backgroundColor: Colors.red,
+          ),
         );
       }
+    }
+  }
+
+  Future<void> _renameLocalEntry(_LocalFileEntry entry) async {
+    final controller = TextEditingController(text: entry.name);
+    final newName = await showDialog<String>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: Text(entry.isDirectory ? 'Rename Local Directory' : 'Rename Local File'),
+        content: TextField(
+          controller: controller,
+          autofocus: true,
+          decoration: const InputDecoration(
+            labelText: 'New Name',
+            border: OutlineInputBorder(),
+          ),
+          onSubmitted: (val) => Navigator.of(ctx).pop(val.trim()),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(null),
+            child: const Text('Cancel'),
+          ),
+          ElevatedButton(
+            onPressed: () => Navigator.of(ctx).pop(controller.text.trim()),
+            child: const Text('Rename'),
+          ),
+        ],
+      ),
+    );
+
+    if (newName == null || newName.isEmpty || newName == entry.name) return;
+
+    try {
+      final newPath = p.join(p.dirname(entry.path), newName);
+      await entry.entity.rename(newPath);
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Renamed "${entry.name}" to "$newName"')),
+        );
+      }
+      await _loadLocalDirectory(_currentLocalPath);
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Failed to rename local item: $e'), backgroundColor: Colors.red),
+        );
+      }
+    }
+  }
+
+  Future<void> _promptAndRemoveLocalDirectory({required bool isDirectory}) async {
+    final candidates = _localItems.where((e) => e.isDirectory == isDirectory).toList();
+    if (candidates.isEmpty) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(
+              isDirectory
+                  ? 'No directories found in the current local folder.'
+                  : 'No files found in the current local folder.',
+            ),
+          ),
+        );
+      }
+      return;
+    }
+
+    final selected = await showDialog<_LocalFileEntry>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: Text(isDirectory ? 'Remove Local Directory' : 'Delete Local File'),
+        content: SizedBox(
+          width: 380,
+          height: 280,
+          child: ListView.builder(
+            shrinkWrap: true,
+            itemCount: candidates.length,
+            itemBuilder: (context, index) {
+              final item = candidates[index];
+              return ListTile(
+                dense: true,
+                leading: Icon(
+                  isDirectory ? Icons.folder : Icons.insert_drive_file,
+                  color: isDirectory ? Colors.amber : Colors.blueGrey,
+                ),
+                title: Text(item.name, overflow: TextOverflow.ellipsis),
+                trailing: const Icon(Icons.delete_outline, color: Colors.redAccent, size: 18),
+                onTap: () => Navigator.of(ctx).pop(item),
+              );
+            },
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(null),
+            child: const Text('Cancel'),
+          ),
+        ],
+      ),
+    );
+
+    if (selected != null) {
+      await _deleteLocalEntry(selected);
     }
   }
 
@@ -525,7 +652,7 @@ class _SftpTabWidgetState extends State<SftpTabWidget> {
           controller: controller,
           autofocus: true,
           decoration: const InputDecoration(
-            labelText: 'Folder Name',
+            labelText: 'Directory Name',
             border: OutlineInputBorder(),
           ),
           onSubmitted: (val) => Navigator.of(ctx).pop(val.trim()),
@@ -546,17 +673,22 @@ class _SftpTabWidgetState extends State<SftpTabWidget> {
 
   Future<void> _createRemoteFolder() async {
     if (_sftpSession == null) return;
-    final folderName = await _promptFolderName('New Remote Folder');
+    final folderName = await _promptFolderName('Make Remote Directory');
     if (folderName == null || folderName.isEmpty) return;
 
     final remoteDir = p.posix.join(_currentRemotePath, folderName);
     try {
       await _sftpSession!.sftp.mkdir(remoteDir);
       await _loadRemoteDirectory(_currentRemotePath);
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Created remote directory "$folderName"')),
+        );
+      }
     } catch (e) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Failed to create remote folder: $e'), backgroundColor: Colors.red),
+          SnackBar(content: Text('Failed to create remote directory: $e'), backgroundColor: Colors.red),
         );
       }
     }
@@ -1048,6 +1180,21 @@ class _SftpTabWidgetState extends State<SftpTabWidget> {
     _enqueueUpload(result.first.path!);
   }
 
+  Future<void> _removeRemoteDirectoryRecursive(String dirPath) async {
+    if (_sftpSession == null) return;
+    final children = await _sftpSession!.sftp.listdir(dirPath);
+    for (final child in children) {
+      if (child.filename == '.' || child.filename == '..') continue;
+      final childPath = p.posix.join(dirPath, child.filename);
+      if (child.attr.isDirectory) {
+        await _removeRemoteDirectoryRecursive(childPath);
+      } else {
+        await _sftpSession!.sftp.remove(childPath);
+      }
+    }
+    await _sftpSession!.sftp.rmdir(dirPath);
+  }
+
   Future<void> _deleteRemoteFile(SftpName item) async {
     if (_sftpSession == null) return;
     final remoteTarget = p.posix.join(_currentRemotePath, item.filename);
@@ -1056,8 +1203,12 @@ class _SftpTabWidgetState extends State<SftpTabWidget> {
     final confirm = await showDialog<bool>(
       context: context,
       builder: (ctx) => AlertDialog(
-        title: Text(isDir ? 'Delete Remote Folder' : 'Delete Remote File'),
-        content: Text('Are you sure you want to delete "${item.filename}" from the remote server?'),
+        title: Text(isDir ? 'Remove Remote Directory' : 'Delete Remote File'),
+        content: Text(
+          isDir
+              ? 'Are you sure you want to remove remote directory "${item.filename}" and its contents from the server?'
+              : 'Are you sure you want to delete remote file "${item.filename}" from the server?',
+        ),
         actions: [
           TextButton(
             onPressed: () => Navigator.of(ctx).pop(false),
@@ -1066,7 +1217,7 @@ class _SftpTabWidgetState extends State<SftpTabWidget> {
           ElevatedButton(
             style: ElevatedButton.styleFrom(backgroundColor: Colors.red),
             onPressed: () => Navigator.of(ctx).pop(true),
-            child: const Text('Delete'),
+            child: Text(isDir ? 'Remove Directory' : 'Delete File'),
           ),
         ],
       ),
@@ -1076,22 +1227,142 @@ class _SftpTabWidgetState extends State<SftpTabWidget> {
 
     try {
       if (isDir) {
-        await _sftpSession!.sftp.rmdir(remoteTarget);
+        await _removeRemoteDirectoryRecursive(remoteTarget);
       } else {
         await _sftpSession!.sftp.remove(remoteTarget);
       }
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Deleted "${item.filename}"')),
+          SnackBar(
+            content: Text(
+              isDir
+                  ? 'Removed remote directory "${item.filename}"'
+                  : 'Deleted remote file "${item.filename}"',
+            ),
+          ),
         );
       }
       await _loadRemoteDirectory(_currentRemotePath);
     } catch (e) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Failed to delete: $e'), backgroundColor: Colors.red),
+          SnackBar(
+            content: Text(
+              isDir
+                  ? 'Failed to remove remote directory: $e'
+                  : 'Failed to delete remote file: $e',
+            ),
+            backgroundColor: Colors.red,
+          ),
         );
       }
+    }
+  }
+
+  Future<void> _renameRemoteEntry(SftpName item) async {
+    if (_sftpSession == null) return;
+    final controller = TextEditingController(text: item.filename);
+    final newName = await showDialog<String>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: Text(item.attr.isDirectory ? 'Rename Remote Directory' : 'Rename Remote File'),
+        content: TextField(
+          controller: controller,
+          autofocus: true,
+          decoration: const InputDecoration(
+            labelText: 'New Name',
+            border: OutlineInputBorder(),
+          ),
+          onSubmitted: (val) => Navigator.of(ctx).pop(val.trim()),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(null),
+            child: const Text('Cancel'),
+          ),
+          ElevatedButton(
+            onPressed: () => Navigator.of(ctx).pop(controller.text.trim()),
+            child: const Text('Rename'),
+          ),
+        ],
+      ),
+    );
+
+    if (newName == null || newName.isEmpty || newName == item.filename) return;
+
+    try {
+      final oldPath = p.posix.join(_currentRemotePath, item.filename);
+      final newPath = p.posix.join(_currentRemotePath, newName);
+      await _sftpSession!.sftp.rename(oldPath, newPath);
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Renamed "${item.filename}" to "$newName"')),
+        );
+      }
+      await _loadRemoteDirectory(_currentRemotePath);
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Failed to rename remote item: $e'), backgroundColor: Colors.red),
+        );
+      }
+    }
+  }
+
+  Future<void> _promptAndRemoveRemoteItem({required bool isDirectory}) async {
+    if (_sftpSession == null) return;
+    final candidates = _remoteItems.where((e) => e.attr.isDirectory == isDirectory).toList();
+    if (candidates.isEmpty) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(
+              isDirectory
+                  ? 'No directories found in the current remote folder.'
+                  : 'No files found in the current remote folder.',
+            ),
+          ),
+        );
+      }
+      return;
+    }
+
+    final selected = await showDialog<SftpName>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: Text(isDirectory ? 'Remove Remote Directory' : 'Delete Remote File'),
+        content: SizedBox(
+          width: 380,
+          height: 280,
+          child: ListView.builder(
+            shrinkWrap: true,
+            itemCount: candidates.length,
+            itemBuilder: (context, index) {
+              final item = candidates[index];
+              return ListTile(
+                dense: true,
+                leading: Icon(
+                  isDirectory ? Icons.folder : Icons.insert_drive_file,
+                  color: isDirectory ? Colors.amber : Colors.blueGrey,
+                ),
+                title: Text(item.filename, overflow: TextOverflow.ellipsis),
+                trailing: const Icon(Icons.delete_outline, color: Colors.redAccent, size: 18),
+                onTap: () => Navigator.of(ctx).pop(item),
+              );
+            },
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(null),
+            child: const Text('Cancel'),
+          ),
+        ],
+      ),
+    );
+
+    if (selected != null) {
+      await _deleteRemoteFile(selected);
     }
   }
 
@@ -1278,6 +1549,157 @@ class _SftpTabWidgetState extends State<SftpTabWidget> {
     }
   }
 
+  void _showLocalPaneContextMenu(BuildContext context, Offset globalPos) {
+    final overlay = Overlay.of(context).context.findRenderObject() as RenderBox;
+
+    showMenu<String>(
+      context: context,
+      position: RelativeRect.fromRect(
+        globalPos & const Size(40, 40),
+        Offset.zero & overlay.size,
+      ),
+      items: [
+        if (_currentLocalPath.isNotEmpty) ...[
+          const PopupMenuItem(
+            value: 'mkdir',
+            child: Row(
+              children: [
+                Icon(Icons.create_new_folder_outlined, size: 16),
+                SizedBox(width: 8),
+                Text('Make Directory...'),
+              ],
+            ),
+          ),
+          const PopupMenuItem(
+            value: 'rmdir',
+            child: Row(
+              children: [
+                Icon(Icons.folder_delete_outlined, size: 16, color: Colors.redAccent),
+                SizedBox(width: 8),
+                Text('Remove Directory...', style: TextStyle(color: Colors.redAccent)),
+              ],
+            ),
+          ),
+          const PopupMenuItem(
+            value: 'delete_file',
+            child: Row(
+              children: [
+                Icon(Icons.delete_outline, size: 16, color: Colors.redAccent),
+                SizedBox(width: 8),
+                Text('Delete File...', style: TextStyle(color: Colors.redAccent)),
+              ],
+            ),
+          ),
+          const PopupMenuDivider(),
+        ],
+        const PopupMenuItem(
+          value: 'choose_folder',
+          child: Row(
+            children: [
+              Icon(Icons.folder_open, size: 16),
+              SizedBox(width: 8),
+              Text('Choose Local Folder...'),
+            ],
+          ),
+        ),
+        const PopupMenuItem(
+          value: 'refresh',
+          child: Row(
+            children: [
+              Icon(Icons.refresh, size: 16),
+              SizedBox(width: 8),
+              Text('Refresh'),
+            ],
+          ),
+        ),
+      ],
+    ).then((choice) {
+      if (choice == 'mkdir') _createLocalFolder();
+      if (choice == 'rmdir') _promptAndRemoveLocalDirectory(isDirectory: true);
+      if (choice == 'delete_file') _promptAndRemoveLocalDirectory(isDirectory: false);
+      if (choice == 'choose_folder') _pickLocalDirectory();
+      if (choice == 'refresh') {
+        if (_currentLocalPath.isNotEmpty) {
+          _loadLocalDirectory(_currentLocalPath);
+        } else {
+          _initLocalBrowser();
+        }
+      }
+    });
+  }
+
+  void _showRemotePaneContextMenu(BuildContext context, Offset globalPos) {
+    if (_sftpSession == null) return;
+    final overlay = Overlay.of(context).context.findRenderObject() as RenderBox;
+
+    showMenu<String>(
+      context: context,
+      position: RelativeRect.fromRect(
+        globalPos & const Size(40, 40),
+        Offset.zero & overlay.size,
+      ),
+      items: [
+        const PopupMenuItem(
+          value: 'mkdir',
+          child: Row(
+            children: [
+              Icon(Icons.create_new_folder_outlined, size: 16),
+              SizedBox(width: 8),
+              Text('Make Directory...'),
+            ],
+          ),
+        ),
+        const PopupMenuItem(
+          value: 'rmdir',
+          child: Row(
+            children: [
+              Icon(Icons.folder_delete_outlined, size: 16, color: Colors.redAccent),
+              SizedBox(width: 8),
+              Text('Remove Directory...', style: TextStyle(color: Colors.redAccent)),
+            ],
+          ),
+        ),
+        const PopupMenuItem(
+          value: 'delete_file',
+          child: Row(
+            children: [
+              Icon(Icons.delete_outline, size: 16, color: Colors.redAccent),
+              SizedBox(width: 8),
+              Text('Delete File...', style: TextStyle(color: Colors.redAccent)),
+            ],
+          ),
+        ),
+        const PopupMenuDivider(),
+        const PopupMenuItem(
+          value: 'upload_file',
+          child: Row(
+            children: [
+              Icon(Icons.upload_file, size: 16),
+              SizedBox(width: 8),
+              Text('Upload File...'),
+            ],
+          ),
+        ),
+        const PopupMenuItem(
+          value: 'refresh',
+          child: Row(
+            children: [
+              Icon(Icons.refresh, size: 16),
+              SizedBox(width: 8),
+              Text('Refresh'),
+            ],
+          ),
+        ),
+      ],
+    ).then((choice) {
+      if (choice == 'mkdir') _createRemoteFolder();
+      if (choice == 'rmdir') _promptAndRemoveRemoteItem(isDirectory: true);
+      if (choice == 'delete_file') _promptAndRemoveRemoteItem(isDirectory: false);
+      if (choice == 'upload_file') _uploadFileViaPicker();
+      if (choice == 'refresh') _loadRemoteDirectory(_currentRemotePath);
+    });
+  }
+
   void _showLocalContextMenu(BuildContext context, Offset globalPos, _LocalFileEntry entry) {
     final overlay = Overlay.of(context).context.findRenderObject() as RenderBox;
 
@@ -1288,7 +1710,18 @@ class _SftpTabWidgetState extends State<SftpTabWidget> {
         Offset.zero & overlay.size,
       ),
       items: [
-        if (!entry.isDirectory)
+        if (entry.isDirectory)
+          const PopupMenuItem(
+            value: 'open_dir',
+            child: Row(
+              children: [
+                Icon(Icons.folder_open, size: 16),
+                SizedBox(width: 8),
+                Text('Open Directory'),
+              ],
+            ),
+          )
+        else
           const PopupMenuItem(
             value: 'open_editor',
             child: Row(
@@ -1305,24 +1738,55 @@ class _SftpTabWidgetState extends State<SftpTabWidget> {
             children: [
               const Icon(Icons.upload, size: 16),
               const SizedBox(width: 8),
-              Text(entry.isDirectory ? 'Upload Folder to Remote' : 'Upload to Remote'),
+              Text(entry.isDirectory ? 'Upload Directory to Remote' : 'Upload File to Remote'),
             ],
           ),
         ),
+        const PopupMenuDivider(),
         const PopupMenuItem(
+          value: 'mkdir',
+          child: Row(
+            children: [
+              Icon(Icons.create_new_folder_outlined, size: 16),
+              SizedBox(width: 8),
+              Text('Make Directory...'),
+            ],
+          ),
+        ),
+        PopupMenuItem(
+          value: 'rename',
+          child: Row(
+            children: [
+              const Icon(Icons.drive_file_rename_outline, size: 16),
+              const SizedBox(width: 8),
+              Text(entry.isDirectory ? 'Rename Directory...' : 'Rename File...'),
+            ],
+          ),
+        ),
+        PopupMenuItem(
           value: 'delete',
           child: Row(
             children: [
-              Icon(Icons.delete_outline, size: 16, color: Colors.redAccent),
-              SizedBox(width: 8),
-              Text('Delete Local', style: TextStyle(color: Colors.redAccent)),
+              Icon(
+                entry.isDirectory ? Icons.folder_delete_outlined : Icons.delete_outline,
+                size: 16,
+                color: Colors.redAccent,
+              ),
+              const SizedBox(width: 8),
+              Text(
+                entry.isDirectory ? 'Remove Directory' : 'Delete File',
+                style: const TextStyle(color: Colors.redAccent),
+              ),
             ],
           ),
         ),
       ],
     ).then((choice) {
+      if (choice == 'open_dir') _loadLocalDirectory(entry.path);
       if (choice == 'open_editor') _openLocalFileInExternalEditor(entry.path);
       if (choice == 'upload') _enqueueUpload(entry.path);
+      if (choice == 'mkdir') _createLocalFolder();
+      if (choice == 'rename') _renameLocalEntry(entry);
       if (choice == 'delete') _deleteLocalEntry(entry);
     });
   }
@@ -1339,7 +1803,18 @@ class _SftpTabWidgetState extends State<SftpTabWidget> {
         Offset.zero & overlay.size,
       ),
       items: [
-        if (!isDir)
+        if (isDir)
+          const PopupMenuItem(
+            value: 'open_dir',
+            child: Row(
+              children: [
+                Icon(Icons.folder_open, size: 16),
+                SizedBox(width: 8),
+                Text('Open Directory'),
+              ],
+            ),
+          )
+        else
           const PopupMenuItem(
             value: 'open_editor',
             child: Row(
@@ -1356,7 +1831,7 @@ class _SftpTabWidgetState extends State<SftpTabWidget> {
             children: [
               const Icon(Icons.west, size: 16),
               const SizedBox(width: 8),
-              Text(isDir ? 'Download Folder to Local Pane' : 'Download to Local Pane'),
+              Text(isDir ? 'Download Directory to Local Pane' : 'Download File to Local Pane'),
             ],
           ),
         ),
@@ -1371,18 +1846,47 @@ class _SftpTabWidgetState extends State<SftpTabWidget> {
               ],
             ),
           ),
+        const PopupMenuDivider(),
         const PopupMenuItem(
+          value: 'mkdir',
+          child: Row(
+            children: [
+              Icon(Icons.create_new_folder_outlined, size: 16),
+              SizedBox(width: 8),
+              Text('Make Directory...'),
+            ],
+          ),
+        ),
+        PopupMenuItem(
+          value: 'rename',
+          child: Row(
+            children: [
+              const Icon(Icons.drive_file_rename_outline, size: 16),
+              const SizedBox(width: 8),
+              Text(isDir ? 'Rename Directory...' : 'Rename File...'),
+            ],
+          ),
+        ),
+        PopupMenuItem(
           value: 'delete',
           child: Row(
             children: [
-              Icon(Icons.delete_outline, size: 16, color: Colors.redAccent),
-              SizedBox(width: 8),
-              Text('Delete Remote', style: TextStyle(color: Colors.redAccent)),
+              Icon(
+                isDir ? Icons.folder_delete_outlined : Icons.delete_outline,
+                size: 16,
+                color: Colors.redAccent,
+              ),
+              const SizedBox(width: 8),
+              Text(
+                isDir ? 'Remove Directory' : 'Delete File',
+                style: const TextStyle(color: Colors.redAccent),
+              ),
             ],
           ),
         ),
       ],
     ).then((choice) {
+      if (choice == 'open_dir') _loadRemoteDirectory(remotePath);
       if (choice == 'open_editor') _enqueueDownloadAndOpenExternal(item);
       if (choice == 'download_local_pane') {
         _enqueueDownloadToLocal(
@@ -1393,6 +1897,8 @@ class _SftpTabWidgetState extends State<SftpTabWidget> {
         );
       }
       if (choice == 'save_as') _enqueueDownloadSaveAs(item);
+      if (choice == 'mkdir') _createRemoteFolder();
+      if (choice == 'rename') _renameRemoteEntry(item);
       if (choice == 'delete') _deleteRemoteFile(item);
     });
   }
@@ -1469,7 +1975,7 @@ class _SftpTabWidgetState extends State<SftpTabWidget> {
               ),
               IconButton(
                 icon: const Icon(Icons.create_new_folder_outlined, size: 18),
-                tooltip: 'New Local Folder',
+                tooltip: 'Make Local Directory',
                 visualDensity: VisualDensity.compact,
                 onPressed: _currentLocalPath.isNotEmpty ? _createLocalFolder : null,
               ),
@@ -1508,51 +2014,70 @@ class _SftpTabWidgetState extends State<SftpTabWidget> {
                 final isHighlighted =
                     candidateData.isNotEmpty || _isExternalDraggingOverLocal;
 
-                return Container(
-                  decoration: BoxDecoration(
-                    border: isHighlighted
-                        ? Border.all(color: Colors.lightBlueAccent, width: 2.5)
-                        : null,
-                    color: isHighlighted
-                        ? Colors.lightBlueAccent.withAlpha(20)
-                        : Colors.transparent,
-                  ),
-                  child: Stack(
-                    children: [
-                      if (_isLocalLoading)
-                        const Center(child: CircularProgressIndicator())
-                      else if (_localErrorMessage != null)
-                        Center(
-                          child: Padding(
-                            padding: const EdgeInsets.all(16.0),
+                return GestureDetector(
+                  behavior: HitTestBehavior.translucent,
+                  onSecondaryTapUp: (details) =>
+                      _showLocalPaneContextMenu(context, details.globalPosition),
+                  onLongPressStart: (details) =>
+                      _showLocalPaneContextMenu(context, details.globalPosition),
+                  child: Container(
+                    decoration: BoxDecoration(
+                      border: isHighlighted
+                          ? Border.all(color: Colors.lightBlueAccent, width: 2.5)
+                          : null,
+                      color: isHighlighted
+                          ? Colors.lightBlueAccent.withAlpha(20)
+                          : Colors.transparent,
+                    ),
+                    child: Stack(
+                      children: [
+                        if (_isLocalLoading)
+                          const Center(child: CircularProgressIndicator())
+                        else if (_localErrorMessage != null)
+                          Center(
+                            child: Padding(
+                              padding: const EdgeInsets.all(16.0),
+                              child: Column(
+                                mainAxisSize: MainAxisSize.min,
+                                children: [
+                                  const Icon(Icons.folder_special, color: Colors.amber, size: 40),
+                                  const SizedBox(height: 8),
+                                  Text(
+                                    _localErrorMessage!,
+                                    textAlign: TextAlign.center,
+                                    style: const TextStyle(fontSize: 12),
+                                  ),
+                                  const SizedBox(height: 12),
+                                  ElevatedButton.icon(
+                                    icon: const Icon(Icons.folder_open, size: 16),
+                                    label: const Text('Select Local Folder...'),
+                                    onPressed: _pickLocalDirectory,
+                                  ),
+                                ],
+                              ),
+                            ),
+                          )
+                        else if (_localItems.isEmpty)
+                          Center(
                             child: Column(
                               mainAxisSize: MainAxisSize.min,
                               children: [
-                                const Icon(Icons.folder_special, color: Colors.amber, size: 40),
-                                const SizedBox(height: 8),
-                                Text(
-                                  _localErrorMessage!,
+                                const Text(
+                                  'Local directory is empty.\nDrag remote files here to download.',
                                   textAlign: TextAlign.center,
-                                  style: const TextStyle(fontSize: 12),
+                                  style: TextStyle(color: Colors.grey),
                                 ),
-                                const SizedBox(height: 12),
-                                ElevatedButton.icon(
-                                  icon: const Icon(Icons.folder_open, size: 16),
-                                  label: const Text('Select Local Folder...'),
-                                  onPressed: _pickLocalDirectory,
-                                ),
+                                if (_currentLocalPath.isNotEmpty) ...[
+                                  const SizedBox(height: 12),
+                                  OutlinedButton.icon(
+                                    icon: const Icon(Icons.create_new_folder_outlined, size: 16),
+                                    label: const Text('Make Directory'),
+                                    onPressed: _createLocalFolder,
+                                  ),
+                                ],
                               ],
                             ),
-                          ),
-                        )
-                      else if (_localItems.isEmpty)
-                        const Center(
-                          child: Text(
-                            'Local directory is empty.\nDrag remote files here to download.',
-                            textAlign: TextAlign.center,
-                            style: TextStyle(color: Colors.grey),
-                          ),
-                        )
+                          )
                       else
                         ListView.builder(
                           itemCount: _localItems.length,
@@ -1590,13 +2115,9 @@ class _SftpTabWidgetState extends State<SftpTabWidget> {
                                 primaryActionTooltip: entry.isDirectory
                                     ? 'Upload folder to remote'
                                     : 'Upload to remote',
-                                onTap: () {
-                                  if (entry.isDirectory) {
-                                    _loadLocalDirectory(entry.path);
-                                  } else {
-                                    _openLocalFileInExternalEditor(entry.path);
-                                  }
-                                },
+                                onTap: entry.isDirectory
+                                    ? () => _loadLocalDirectory(entry.path)
+                                    : null,
                                 onPrimaryAction: () => _enqueueUpload(entry.path),
                                 onDelete: () => _deleteLocalEntry(entry),
                                 onSecondaryTapUp: (details) =>
@@ -1605,36 +2126,37 @@ class _SftpTabWidgetState extends State<SftpTabWidget> {
                             );
                           },
                         ),
-                      if (isHighlighted)
-                        IgnorePointer(
-                          child: Center(
-                            child: Container(
-                              padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 12),
-                              decoration: BoxDecoration(
-                                color: Colors.black.withAlpha(200),
-                                borderRadius: BorderRadius.circular(10),
-                                border: Border.all(color: Colors.lightBlueAccent),
-                              ),
-                              child: Row(
-                                mainAxisSize: MainAxisSize.min,
-                                children: [
-                                  const Icon(Icons.file_download,
-                                      color: Colors.lightBlueAccent, size: 24),
-                                  const SizedBox(width: 10),
-                                  Text(
-                                    'Drop to download into ${p.basename(_currentLocalPath).isEmpty ? _currentLocalPath : p.basename(_currentLocalPath)}',
-                                    style: const TextStyle(
-                                      color: Colors.lightBlueAccent,
-                                      fontWeight: FontWeight.bold,
-                                      fontSize: 13,
+                        if (isHighlighted)
+                          IgnorePointer(
+                            child: Center(
+                              child: Container(
+                                padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 12),
+                                decoration: BoxDecoration(
+                                  color: Colors.black.withAlpha(200),
+                                  borderRadius: BorderRadius.circular(10),
+                                  border: Border.all(color: Colors.lightBlueAccent),
+                                ),
+                                child: Row(
+                                  mainAxisSize: MainAxisSize.min,
+                                  children: [
+                                    const Icon(Icons.file_download,
+                                        color: Colors.lightBlueAccent, size: 24),
+                                    const SizedBox(width: 10),
+                                    Text(
+                                      'Drop to download into ${p.basename(_currentLocalPath).isEmpty ? _currentLocalPath : p.basename(_currentLocalPath)}',
+                                      style: const TextStyle(
+                                        color: Colors.lightBlueAccent,
+                                        fontWeight: FontWeight.bold,
+                                        fontSize: 13,
+                                      ),
                                     ),
-                                  ),
-                                ],
+                                  ],
+                                ),
                               ),
                             ),
                           ),
-                        ),
-                    ],
+                      ],
+                    ),
                   ),
                 );
               },
@@ -1716,7 +2238,7 @@ class _SftpTabWidgetState extends State<SftpTabWidget> {
               ),
               IconButton(
                 icon: const Icon(Icons.create_new_folder_outlined, size: 18),
-                tooltip: 'New Remote Folder',
+                tooltip: 'Make Remote Directory',
                 visualDensity: VisualDensity.compact,
                 onPressed: _sftpSession != null ? _createRemoteFolder : null,
               ),
@@ -1755,152 +2277,168 @@ class _SftpTabWidgetState extends State<SftpTabWidget> {
                 final isHighlighted =
                     candidateData.isNotEmpty || _isExternalDraggingOverRemote;
 
-                return Container(
-                  decoration: BoxDecoration(
-                    border: isHighlighted
-                        ? Border.all(color: Colors.amberAccent, width: 2.5)
-                        : null,
-                    color: isHighlighted
-                        ? Colors.amberAccent.withAlpha(20)
-                        : Colors.transparent,
-                  ),
-                  child: Stack(
-                    children: [
-                      if (_isRemoteLoading)
-                        const Center(child: CircularProgressIndicator())
-                      else if (_remoteErrorMessage != null)
-                        Center(
-                          child: Column(
-                            mainAxisSize: MainAxisSize.min,
-                            children: [
-                              const Icon(Icons.error_outline, color: Colors.red, size: 40),
-                              const SizedBox(height: 8),
-                              Text(_remoteErrorMessage!, textAlign: TextAlign.center),
-                              const SizedBox(height: 12),
-                              Wrap(
-                                spacing: 10,
-                                runSpacing: 8,
-                                alignment: WrapAlignment.center,
-                                children: [
-                                  ElevatedButton(
-                                    onPressed: _initSftp,
-                                    child: const Text('Retry Connection'),
-                                  ),
-                                  if (_sftpSession != null)
-                                    OutlinedButton.icon(
-                                      icon: const Icon(Icons.home_outlined, size: 16),
-                                      label: const Text('Go to Home (~/)'),
-                                      onPressed: () => _loadRemoteDirectory('~/'),
+                return GestureDetector(
+                  behavior: HitTestBehavior.translucent,
+                  onSecondaryTapUp: (details) =>
+                      _showRemotePaneContextMenu(context, details.globalPosition),
+                  onLongPressStart: (details) =>
+                      _showRemotePaneContextMenu(context, details.globalPosition),
+                  child: Container(
+                    decoration: BoxDecoration(
+                      border: isHighlighted
+                          ? Border.all(color: Colors.amberAccent, width: 2.5)
+                          : null,
+                      color: isHighlighted
+                          ? Colors.amberAccent.withAlpha(20)
+                          : Colors.transparent,
+                    ),
+                    child: Stack(
+                      children: [
+                        if (_isRemoteLoading)
+                          const Center(child: CircularProgressIndicator())
+                        else if (_remoteErrorMessage != null)
+                          Center(
+                            child: Column(
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                const Icon(Icons.error_outline, color: Colors.red, size: 40),
+                                const SizedBox(height: 8),
+                                Text(_remoteErrorMessage!, textAlign: TextAlign.center),
+                                const SizedBox(height: 12),
+                                Wrap(
+                                  spacing: 10,
+                                  runSpacing: 8,
+                                  alignment: WrapAlignment.center,
+                                  children: [
+                                    ElevatedButton(
+                                      onPressed: _initSftp,
+                                      child: const Text('Retry Connection'),
                                     ),
+                                    if (_sftpSession != null)
+                                      OutlinedButton.icon(
+                                        icon: const Icon(Icons.home_outlined, size: 16),
+                                        label: const Text('Go to Home (~/)'),
+                                        onPressed: () => _loadRemoteDirectory('~/'),
+                                      ),
+                                  ],
+                                ),
+                              ],
+                            ),
+                          )
+                        else if (_remoteItems.isEmpty)
+                          Center(
+                            child: Column(
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                const Text(
+                                  'Remote directory is empty.\nDrag local files here to upload.',
+                                  textAlign: TextAlign.center,
+                                  style: TextStyle(color: Colors.grey),
+                                ),
+                                if (_sftpSession != null) ...[
+                                  const SizedBox(height: 12),
+                                  OutlinedButton.icon(
+                                    icon: const Icon(Icons.create_new_folder_outlined, size: 16),
+                                    label: const Text('Make Directory'),
+                                    onPressed: _createRemoteFolder,
+                                  ),
                                 ],
-                              ),
-                            ],
-                          ),
-                        )
-                      else if (_remoteItems.isEmpty)
-                        const Center(
-                          child: Text(
-                            'Remote directory is empty.\nDrag local files here to upload.',
-                            textAlign: TextAlign.center,
-                            style: TextStyle(color: Colors.grey),
-                          ),
-                        )
-                      else
-                        ListView.builder(
-                          itemCount: _remoteItems.length,
-                          itemBuilder: (context, index) {
-                            final item = _remoteItems[index];
-                            final isDir = item.attr.isDirectory;
-                            final remoteItemPath =
-                                p.posix.join(_currentRemotePath, item.filename);
+                              ],
+                            ),
+                          )
+                        else
+                          ListView.builder(
+                            itemCount: _remoteItems.length,
+                            itemBuilder: (context, index) {
+                              final item = _remoteItems[index];
+                              final isDir = item.attr.isDirectory;
+                              final remoteItemPath =
+                                  p.posix.join(_currentRemotePath, item.filename);
 
-                            final payload = _SftpDragPayload(
-                              source: _DragSource.remote,
-                              path: remoteItemPath,
-                              name: item.filename,
-                              isDirectory: isDir,
-                              size: item.attr.size,
-                            );
-
-                            return _DraggableTransferRow(
-                              payload: payload,
-                              acceptsDropFrom: isDir ? _DragSource.local : null,
-                              onAcceptDrop: isDir
-                                  ? (incoming) {
-                                      _enqueueUpload(
-                                        incoming.path,
-                                        targetRemoteDir: remoteItemPath,
-                                      );
-                                    }
-                                  : null,
-                              child: HoverableFileRow(
+                              final payload = _SftpDragPayload(
+                                source: _DragSource.remote,
+                                path: remoteItemPath,
                                 name: item.filename,
-                                subtitle: isDir
-                                    ? 'Folder'
-                                    : '${_formatBytes(item.attr.size ?? 0)} • ${item.attr.modifyTime ?? ''}',
-                                isDir: isDir,
-                                primaryActionIcon: _showLocalPane ? Icons.west : Icons.download,
-                                primaryActionTooltip: _showLocalPane
-                                    ? (isDir
-                                        ? 'Download folder to local pane'
-                                        : 'Download to local pane')
-                                    : 'Save file as...',
-                                onTap: () {
-                                  if (isDir) {
-                                    _loadRemoteDirectory(remoteItemPath);
-                                  } else {
-                                    _enqueueDownloadAndOpenExternal(item);
-                                  }
-                                },
-                                onPrimaryAction: () {
-                                  if (_showLocalPane && _currentLocalPath.isNotEmpty) {
-                                    _enqueueDownloadToLocal(
-                                      remotePath: remoteItemPath,
-                                      name: item.filename,
-                                      isDirectory: isDir,
-                                      size: item.attr.size,
-                                    );
-                                  } else if (!isDir) {
-                                    _enqueueDownloadSaveAs(item);
-                                  }
-                                },
-                                onDelete: () => _deleteRemoteFile(item),
-                                onSecondaryTapUp: (details) =>
-                                    _showRemoteContextMenu(context, details.globalPosition, item),
-                              ),
-                            );
-                          },
-                        ),
-                      if (isHighlighted)
-                        IgnorePointer(
-                          child: Center(
-                            child: Container(
-                              padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 12),
-                              decoration: BoxDecoration(
-                                color: Colors.black.withAlpha(200),
-                                borderRadius: BorderRadius.circular(10),
-                                border: Border.all(color: Colors.amberAccent),
-                              ),
-                              child: Row(
-                                mainAxisSize: MainAxisSize.min,
-                                children: [
-                                  const Icon(Icons.file_upload,
-                                      color: Colors.amberAccent, size: 24),
-                                  const SizedBox(width: 10),
-                                  Text(
-                                    'Drop to upload into $_currentRemotePath',
-                                    style: const TextStyle(
-                                      color: Colors.amberAccent,
-                                      fontWeight: FontWeight.bold,
-                                      fontSize: 13,
+                                isDirectory: isDir,
+                                size: item.attr.size,
+                              );
+
+                              return _DraggableTransferRow(
+                                payload: payload,
+                                acceptsDropFrom: isDir ? _DragSource.local : null,
+                                onAcceptDrop: isDir
+                                    ? (incoming) {
+                                        _enqueueUpload(
+                                          incoming.path,
+                                          targetRemoteDir: remoteItemPath,
+                                        );
+                                      }
+                                    : null,
+                                child: HoverableFileRow(
+                                  name: item.filename,
+                                  subtitle: isDir
+                                      ? 'Folder'
+                                      : '${_formatBytes(item.attr.size ?? 0)} • ${item.attr.modifyTime ?? ''}',
+                                  isDir: isDir,
+                                  primaryActionIcon: _showLocalPane ? Icons.west : Icons.download,
+                                  primaryActionTooltip: _showLocalPane
+                                      ? (isDir
+                                          ? 'Download folder to local pane'
+                                          : 'Download to local pane')
+                                      : 'Save file as...',
+                                  onTap: isDir
+                                      ? () => _loadRemoteDirectory(remoteItemPath)
+                                      : null,
+                                  onPrimaryAction: () {
+                                    if (_showLocalPane && _currentLocalPath.isNotEmpty) {
+                                      _enqueueDownloadToLocal(
+                                        remotePath: remoteItemPath,
+                                        name: item.filename,
+                                        isDirectory: isDir,
+                                        size: item.attr.size,
+                                      );
+                                    } else if (!isDir) {
+                                      _enqueueDownloadSaveAs(item);
+                                    }
+                                  },
+                                  onDelete: () => _deleteRemoteFile(item),
+                                  onSecondaryTapUp: (details) =>
+                                      _showRemoteContextMenu(context, details.globalPosition, item),
+                                ),
+                              );
+                            },
+                          ),
+                        if (isHighlighted)
+                          IgnorePointer(
+                            child: Center(
+                              child: Container(
+                                padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 12),
+                                decoration: BoxDecoration(
+                                  color: Colors.black.withAlpha(200),
+                                  borderRadius: BorderRadius.circular(10),
+                                  border: Border.all(color: Colors.amberAccent),
+                                ),
+                                child: Row(
+                                  mainAxisSize: MainAxisSize.min,
+                                  children: [
+                                    const Icon(Icons.file_upload,
+                                        color: Colors.amberAccent, size: 24),
+                                    const SizedBox(width: 10),
+                                    Text(
+                                      'Drop to upload into $_currentRemotePath',
+                                      style: const TextStyle(
+                                        color: Colors.amberAccent,
+                                        fontWeight: FontWeight.bold,
+                                        fontSize: 13,
+                                      ),
                                     ),
-                                  ),
-                                ],
+                                  ],
+                                ),
                               ),
                             ),
                           ),
-                        ),
-                    ],
+                      ],
+                    ),
                   ),
                 );
               },
@@ -2211,7 +2749,7 @@ class HoverableFileRow extends StatefulWidget {
   final bool isDir;
   final IconData primaryActionIcon;
   final String primaryActionTooltip;
-  final VoidCallback onTap;
+  final VoidCallback? onTap;
   final VoidCallback? onPrimaryAction;
   final VoidCallback onDelete;
   final Function(TapUpDetails details) onSecondaryTapUp;
@@ -2223,7 +2761,7 @@ class HoverableFileRow extends StatefulWidget {
     required this.isDir,
     required this.primaryActionIcon,
     required this.primaryActionTooltip,
-    required this.onTap,
+    this.onTap,
     this.onPrimaryAction,
     required this.onDelete,
     required this.onSecondaryTapUp,
@@ -2281,8 +2819,12 @@ class _HoverableFileRowState extends State<HoverableFileRow> {
                           onPressed: widget.onPrimaryAction,
                         ),
                       IconButton(
-                        icon: const Icon(Icons.delete_outline, size: 18, color: Colors.redAccent),
-                        tooltip: 'Delete',
+                        icon: Icon(
+                          widget.isDir ? Icons.folder_delete_outlined : Icons.delete_outline,
+                          size: 18,
+                          color: Colors.redAccent,
+                        ),
+                        tooltip: widget.isDir ? 'Remove Directory' : 'Delete File',
                         onPressed: widget.onDelete,
                       ),
                     ],

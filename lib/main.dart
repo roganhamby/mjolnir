@@ -302,12 +302,64 @@ class _MainScreenState extends State<MainScreen> {
     }
   }
 
-  void _launchServerDefault(ServerConfig server) {
-    if (server.connectionType == ConnectionType.sftp) {
-      _openSftpTab(server);
-    } else {
-      _openTerminalTab(server);
-    }
+  void _showServerContextMenu(BuildContext context, Offset globalPos, ServerConfig server) {
+    final overlay = Overlay.of(context).context.findRenderObject() as RenderBox;
+
+    showMenu<String>(
+      context: context,
+      position: RelativeRect.fromRect(
+        globalPos & const Size(40, 40),
+        Offset.zero & overlay.size,
+      ),
+      items: [
+        const PopupMenuItem(
+          value: 'ssh',
+          child: Row(
+            children: [
+              Icon(Icons.terminal, size: 16),
+              SizedBox(width: 8),
+              Text('Open SSH Terminal'),
+            ],
+          ),
+        ),
+        const PopupMenuItem(
+          value: 'sftp',
+          child: Row(
+            children: [
+              Icon(Icons.folder_shared, size: 16),
+              SizedBox(width: 8),
+              Text('Open SFTP Browser'),
+            ],
+          ),
+        ),
+        const PopupMenuDivider(),
+        const PopupMenuItem(
+          value: 'edit',
+          child: Row(
+            children: [
+              Icon(Icons.edit_outlined, size: 16),
+              SizedBox(width: 8),
+              Text('Edit'),
+            ],
+          ),
+        ),
+        const PopupMenuItem(
+          value: 'delete',
+          child: Row(
+            children: [
+              Icon(Icons.delete_outline, size: 16, color: Colors.redAccent),
+              SizedBox(width: 8),
+              Text('Delete', style: TextStyle(color: Colors.redAccent)),
+            ],
+          ),
+        ),
+      ],
+    ).then((val) {
+      if (val == 'ssh') _openTerminalTab(server);
+      if (val == 'sftp') _openSftpTab(server);
+      if (val == 'edit') _showAddOrEditServerDialog(server);
+      if (val == 'delete') _confirmDeleteServer(server);
+    });
   }
 
   Future<void> _closeTab(String tabId) async {
@@ -1576,60 +1628,94 @@ class _MainScreenState extends State<MainScreen> {
                     final server = servers[index];
                     final isSftp = server.connectionType == ConnectionType.sftp;
 
-                    return ListTile(
-                      dense: true,
-                      leading: Icon(
-                        isSftp ? Icons.folder_shared : Icons.computer,
-                        size: 20,
-                        color: scheme.accentColor,
-                      ),
-                      title: Row(
-                        children: [
-                          Expanded(
-                            child: Text(server.name, style: const TextStyle(fontWeight: FontWeight.w600)),
-                          ),
-                          Container(
-                            padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
-                            decoration: BoxDecoration(
-                              color: isSftp
-                                  ? scheme.secondaryAccent.withValues(alpha: 0.22)
-                                  : scheme.accentColor.withValues(alpha: 0.22),
-                              borderRadius: BorderRadius.circular(4),
+                    return GestureDetector(
+                      behavior: HitTestBehavior.opaque,
+                      onSecondaryTapUp: (details) =>
+                          _showServerContextMenu(context, details.globalPosition, server),
+                      onLongPressStart: (details) =>
+                          _showServerContextMenu(context, details.globalPosition, server),
+                      child: ListTile(
+                        dense: true,
+                        leading: Icon(
+                          isSftp ? Icons.folder_shared : Icons.computer,
+                          size: 20,
+                          color: scheme.accentColor,
+                        ),
+                        title: Row(
+                          children: [
+                            Expanded(
+                              child: Text(server.name, style: const TextStyle(fontWeight: FontWeight.w600)),
                             ),
-                            child: Text(
-                              isSftp ? 'SFTP' : 'SSH',
-                              style: const TextStyle(fontSize: 9, fontWeight: FontWeight.bold),
+                            Container(
+                              padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                              decoration: BoxDecoration(
+                                color: isSftp
+                                    ? scheme.secondaryAccent.withValues(alpha: 0.22)
+                                    : scheme.accentColor.withValues(alpha: 0.22),
+                                borderRadius: BorderRadius.circular(4),
+                              ),
+                              child: Text(
+                                isSftp ? 'SFTP' : 'SSH',
+                                style: const TextStyle(fontSize: 9, fontWeight: FontWeight.bold),
+                              ),
                             ),
-                          ),
-                        ],
+                          ],
+                        ),
+                        subtitle: Text('${server.username}@${server.host}:${server.port}',
+                            style: const TextStyle(fontSize: 11)),
+                        trailing: PopupMenuButton<String>(
+                          icon: const Icon(Icons.more_vert, size: 16),
+                          onSelected: (val) {
+                            if (val == 'ssh') _openTerminalTab(server);
+                            if (val == 'sftp') _openSftpTab(server);
+                            if (val == 'edit') _showAddOrEditServerDialog(server);
+                            if (val == 'delete') _confirmDeleteServer(server);
+                          },
+                          itemBuilder: (context) => [
+                            const PopupMenuItem(
+                              value: 'ssh',
+                              child: Row(
+                                children: [
+                                  Icon(Icons.terminal, size: 16),
+                                  SizedBox(width: 8),
+                                  Text('Open SSH Terminal'),
+                                ],
+                              ),
+                            ),
+                            const PopupMenuItem(
+                              value: 'sftp',
+                              child: Row(
+                                children: [
+                                  Icon(Icons.folder_shared, size: 16),
+                                  SizedBox(width: 8),
+                                  Text('Open SFTP Browser'),
+                                ],
+                              ),
+                            ),
+                            const PopupMenuDivider(),
+                            const PopupMenuItem(
+                              value: 'edit',
+                              child: Row(
+                                children: [
+                                  Icon(Icons.edit_outlined, size: 16),
+                                  SizedBox(width: 8),
+                                  Text('Edit'),
+                                ],
+                              ),
+                            ),
+                            const PopupMenuItem(
+                              value: 'delete',
+                              child: Row(
+                                children: [
+                                  Icon(Icons.delete_outline, size: 16, color: Colors.redAccent),
+                                  SizedBox(width: 8),
+                                  Text('Delete', style: TextStyle(color: Colors.redAccent)),
+                                ],
+                              ),
+                            ),
+                          ],
+                        ),
                       ),
-                      subtitle: Text('${server.username}@${server.host}:${server.port}',
-                          style: const TextStyle(fontSize: 11)),
-                      trailing: PopupMenuButton<String>(
-                        icon: const Icon(Icons.more_vert, size: 16),
-                        onSelected: (val) {
-                          if (val == 'launch') _launchServerDefault(server);
-                          if (val == 'ssh') _openTerminalTab(server);
-                          if (val == 'sftp') _openSftpTab(server);
-                          if (val == 'edit') _showAddOrEditServerDialog(server);
-                          if (val == 'delete') _confirmDeleteServer(server);
-                        },
-                        itemBuilder: (context) => [
-                          PopupMenuItem(
-                            value: 'launch',
-                            child: Text('Connect (${isSftp ? 'SFTP' : 'SSH'})'),
-                          ),
-                          const PopupMenuItem(value: 'ssh', child: Text('Open SSH Terminal')),
-                          const PopupMenuItem(value: 'sftp', child: Text('Open SFTP Browser')),
-                          const PopupMenuDivider(),
-                          const PopupMenuItem(value: 'edit', child: Text('Edit')),
-                          const PopupMenuItem(
-                            value: 'delete',
-                            child: Text('Delete', style: TextStyle(color: Colors.redAccent)),
-                          ),
-                        ],
-                      ),
-                      onTap: () => _launchServerDefault(server),
                     );
                   },
                 ),
@@ -1647,7 +1733,7 @@ class _MainScreenState extends State<MainScreen> {
             Icon(Icons.terminal_outlined, size: 56, color: scheme.mutedText),
             const SizedBox(height: 12),
             Text(
-              'Select a server from the sidebar to launch an SSH terminal or SFTP browser.',
+              'Right-click a server in the sidebar to open an SSH terminal or SFTP browser.',
               style: TextStyle(color: scheme.mutedText),
             ),
             const SizedBox(height: 16),
