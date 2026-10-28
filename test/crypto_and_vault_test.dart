@@ -47,7 +47,7 @@ class _FakeDropboxSyncService extends DropboxSyncService {
   _FakeDropboxSyncService({
     required this.remoteResult,
     DropboxConfig? config,
-  }) : fakeConfig = config ?? DropboxConfig(accessToken: 'fake-token', folderPath: '/App/Mjolnir');
+  }) : fakeConfig = config ?? DropboxConfig(accessToken: 'fake-token', folderPath: '');
 
   @override
   DropboxConfig get config => fakeConfig;
@@ -65,7 +65,9 @@ class _FakeDropboxSyncService extends DropboxSyncService {
     String jsonString, {
     String fileName = 'servers.json',
   }) async {
-    return '$normalizedFolderPath/$fileName';
+    final folder = normalizedFolderPath;
+    final clean = fileName.trim().replaceAll(RegExp(r'^/+'), '');
+    return folder.isEmpty ? '/$clean' : '$folder/$clean';
   }
 
   @override
@@ -340,12 +342,13 @@ void main() {
         remoteResult: (
           vault: newerDropboxVault,
           rawJson: newerDropboxVault.toFormattedJson(),
-          filePath: '/App/Mjolnir/servers.json',
+          filePath: '/servers.json',
           modifiedAt: newerDropboxVault.updatedAt,
         ),
       );
 
-      expect(dropbox.normalizedFolderPath, equals('/App/Mjolnir'));
+      expect(dropbox.normalizedFolderPath, equals(''));
+      expect(dropbox.displayFolderPath, equals('All files / Apps / Mjolnir'));
 
       final manager = VaultManager(
         storageProvider: storage,
@@ -355,7 +358,7 @@ void main() {
 
       expect(manager.servers.length, equals(1));
       expect(manager.servers.first.name, equals('New Dropbox Server'));
-      expect(manager.loadedSource, contains('Dropbox (/App/Mjolnir/servers.json)'));
+      expect(manager.loadedSource, contains('Dropbox (/servers.json)'));
     });
 
     test('AppColorSchemes provides valid dark and light color schemes and ThemeData', () {
@@ -507,7 +510,7 @@ void main() {
           appKey: 'dbx-app-key-123',
           appSecret: 'dbx-app-secret-456',
           refreshToken: 'dbx-refresh-token-789',
-          folderPath: '/App/Mjolnir',
+          folderPath: '',
           autoSyncOnLoadAndSave: true,
         ),
       );

@@ -455,7 +455,7 @@ class VaultManager with ChangeNotifier {
     final newest = await dropboxService.fetchNewestVaultFromDropbox();
     if (newest == null) {
       throw Exception(
-        'No JSON vault files found in Dropbox directory ${dropboxService.normalizedFolderPath}.',
+        'No JSON vault files found in Dropbox directory ${dropboxService.displayFolderPath}.',
       );
     }
 

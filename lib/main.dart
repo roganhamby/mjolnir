@@ -747,7 +747,7 @@ class _MainScreenState extends State<MainScreen> {
       await _vaultManager.exportVaultToDropbox(fileName: 'mjolnir-servers-$dateStr.json');
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Exported JSON vault to Dropbox ($path).')),
+          SnackBar(content: Text('Exported JSON vault to Dropbox ($path in ${dropbox.displayFolderPath}).')),
         );
       }
     } catch (e) {
@@ -779,7 +779,7 @@ class _MainScreenState extends State<MainScreen> {
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             Text(
-              'Fetches the newest JSON file from Dropbox directory "${dropbox.normalizedFolderPath}" and merges connections & tasks.',
+              'Fetches the newest JSON file from Dropbox directory "${dropbox.displayFolderPath}" and merges connections & tasks.',
               style: const TextStyle(fontSize: 12, color: Colors.grey),
             ),
             const SizedBox(height: 12),
@@ -838,11 +838,24 @@ class _MainScreenState extends State<MainScreen> {
     }
   }
 
+  Future<void> _openExternalUrl(String url) async {
+    try {
+      if (Platform.isMacOS) {
+        await Process.run('open', [url]);
+      } else if (Platform.isWindows) {
+        await Process.run('cmd', ['/c', 'start', '', url]);
+      } else if (Platform.isLinux) {
+        await Process.run('xdg-open', [url]);
+      }
+    } catch (_) {}
+    await Clipboard.setData(ClipboardData(text: url));
+  }
+
   void _showDropboxDialog() {
     final dropbox = _vaultManager.dropboxService;
     final tokenController = TextEditingController(text: dropbox.config.accessToken);
     final folderController = TextEditingController(
-      text: dropbox.config.folderPath.isEmpty ? '/App/Mjolnir' : dropbox.config.folderPath,
+      text: dropbox.config.folderPath,
     );
     final appKeyController = TextEditingController(text: dropbox.config.appKey ?? '');
     final appSecretController = TextEditingController(text: dropbox.config.appSecret ?? '');
@@ -865,7 +878,7 @@ class _MainScreenState extends State<MainScreen> {
               appKey: appKeyController.text.trim().isEmpty ? null : appKeyController.text.trim(),
               appSecret: appSecretController.text.trim().isEmpty ? null : appSecretController.text.trim(),
               refreshToken: refreshTokenController.text.trim().isEmpty ? null : refreshTokenController.text.trim(),
-              folderPath: folderController.text.trim().isEmpty ? '/App/Mjolnir' : folderController.text.trim(),
+              folderPath: folderController.text.trim(),
               autoSyncOnLoadAndSave: autoSync,
             );
             await _vaultManager.saveDropboxConfig(newConfig);
@@ -876,7 +889,7 @@ class _MainScreenState extends State<MainScreen> {
               children: [
                 Icon(Icons.cloud_sync_outlined, color: Colors.amberAccent),
                 SizedBox(width: 10),
-                Text('Dropbox API Sync (/App/Mjolnir)'),
+                Text('Dropbox API Sync (All files / Apps / Mjolnir)'),
               ],
             ),
             content: SizedBox(
@@ -888,16 +901,16 @@ class _MainScreenState extends State<MainScreen> {
                   children: [
                     const Text(
                       'Sync, import, and export your encrypted JSON vault via Dropbox API. '
-                      'When loading, Mjölnir checks your Dropbox directory (default /App/Mjolnir) and automatically uses the newest vault.',
+                      'Mjölnir syncs directly with your Dropbox app folder: All files / Apps / Mjolnir.',
                       style: TextStyle(fontSize: 12, color: Colors.grey),
                     ),
                     const SizedBox(height: 16),
                     TextField(
                       controller: folderController,
                       decoration: const InputDecoration(
-                        labelText: 'Dropbox Directory Path',
-                        hintText: '/App/Mjolnir',
-                        helperText: 'Mjölnir creates /App/Mjolnir automatically if it does not exist.',
+                        labelText: 'Dropbox Subfolder (Optional)',
+                        hintText: 'Leave empty for All files / Apps / Mjolnir',
+                        helperText: 'Default root is All files / Apps / Mjolnir. Enter a subfolder only if desired.',
                         border: OutlineInputBorder(),
                         isDense: true,
                       ),
@@ -913,14 +926,33 @@ class _MainScreenState extends State<MainScreen> {
                         isDense: true,
                       ),
                     ),
-                    const SizedBox(height: 8),
+                    const SizedBox(height: 4),
+                    Row(
+                      children: [
+                        TextButton.icon(
+                          style: TextButton.styleFrom(
+                            padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 0),
+                            visualDensity: VisualDensity.compact,
+                          ),
+                          icon: const Icon(Icons.open_in_new, size: 13),
+                          label: const Text('Open Dropbox App Console to Generate Token', style: TextStyle(fontSize: 11)),
+                          onPressed: () => _openExternalUrl('https://www.dropbox.com/developers/apps'),
+                        ),
+                        const Spacer(),
+                        const Text(
+                          'Console tokens expire in 4 hrs',
+                          style: TextStyle(fontSize: 10, color: Colors.orangeAccent),
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 6),
                     SwitchListTile(
                       contentPadding: EdgeInsets.zero,
                       dense: true,
                       title: const Text('Use newest vault on load & auto-sync saves'),
-                      subtitle: const Text(
-                        'Compares timestamps on startup and uses the newest JSON from /App/Mjolnir',
-                        style: TextStyle(fontSize: 11, color: Colors.grey),
+                      subtitle: Text(
+                        'Compares timestamps on startup and uses the newest JSON from ${dropbox.displayFolderPath}',
+                        style: const TextStyle(fontSize: 11, color: Colors.grey),
                       ),
                       value: autoSync,
                       onChanged: (val) => setDialogState(() => autoSync = val),
@@ -928,38 +960,99 @@ class _MainScreenState extends State<MainScreen> {
                     ExpansionTile(
                       tilePadding: EdgeInsets.zero,
                       initiallyExpanded: showOAuthFields,
-                      title: const Text(
-                        'Optional: OAuth2 Refresh Token / App Key',
-                        style: TextStyle(fontSize: 12, color: Colors.grey),
+                      title: Row(
+                        children: [
+                          const Text(
+                            'Permanent Sync: OAuth2 Offline Refresh Token',
+                            style: TextStyle(fontSize: 12, fontWeight: FontWeight.w600),
+                          ),
+                          const SizedBox(width: 8),
+                          if (refreshTokenController.text.trim().isNotEmpty)
+                            const Icon(Icons.check_circle, size: 14, color: Colors.green),
+                        ],
+                      ),
+                      subtitle: const Text(
+                        'Prevents 4-hour token expiration with background auto-refresh',
+                        style: TextStyle(fontSize: 10, color: Colors.grey),
                       ),
                       children: [
-                        const SizedBox(height: 6),
+                        if (refreshTokenController.text.trim().isNotEmpty) ...[
+                          Container(
+                            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                            margin: const EdgeInsets.only(bottom: 10),
+                            decoration: BoxDecoration(
+                              color: Colors.green.withAlpha(25),
+                              borderRadius: BorderRadius.circular(6),
+                              border: Border.all(color: Colors.green.withAlpha(60)),
+                            ),
+                            child: const Row(
+                              children: [
+                                Icon(Icons.check_circle_outline, color: Colors.green, size: 16),
+                                SizedBox(width: 8),
+                                Expanded(
+                                  child: Text(
+                                    'Permanent auto-refresh active. Mjölnir will refresh expired access tokens automatically.',
+                                    style: TextStyle(color: Colors.green, fontSize: 11),
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ),
+                        ],
+                        const Text(
+                          'To enable permanent sync without token expiration:\n'
+                          '1. In Dropbox App Console (Settings tab), copy your App Key.\n'
+                          '2. In the Permissions tab, verify "files.content.write" and "files.content.read" are enabled.\n'
+                          '3. Paste App Key below and click "1. Authorize in Browser" to get an authorization code.\n'
+                          '4. Paste the code into Step 2 below and click "Exchange & Save".',
+                          style: TextStyle(fontSize: 11, color: Colors.grey, height: 1.3),
+                        ),
+                        const SizedBox(height: 10),
                         TextField(
                           controller: appKeyController,
                           decoration: const InputDecoration(
                             labelText: 'Dropbox App Key',
+                            hintText: 'Found in Dropbox App Console -> Settings',
                             border: OutlineInputBorder(),
                             isDense: true,
                           ),
                         ),
-                        const SizedBox(height: 10),
+                        const SizedBox(height: 8),
                         TextField(
                           controller: appSecretController,
                           obscureText: true,
                           decoration: const InputDecoration(
-                            labelText: 'Dropbox App Secret',
+                            labelText: 'Dropbox App Secret (Optional)',
+                            hintText: 'Leave empty if your app does not require a secret',
                             border: OutlineInputBorder(),
                             isDense: true,
                           ),
                         ),
-                        const SizedBox(height: 10),
-                        TextField(
-                          controller: refreshTokenController,
-                          obscureText: true,
-                          decoration: const InputDecoration(
-                            labelText: 'OAuth2 Refresh Token (if already obtained)',
-                            border: OutlineInputBorder(),
-                            isDense: true,
+                        const SizedBox(height: 8),
+                        SizedBox(
+                          width: double.infinity,
+                          child: OutlinedButton.icon(
+                            icon: const Icon(Icons.open_in_browser, size: 16),
+                            label: const Text('1. Authorize in Browser (Get Code)'),
+                            onPressed: () async {
+                              final key = appKeyController.text.trim();
+                              if (key.isEmpty) {
+                                setDialogState(() {
+                                  isError = true;
+                                  statusMsg = 'Please enter your Dropbox App Key first.';
+                                });
+                                return;
+                              }
+                              final authUrl =
+                                  'https://www.dropbox.com/oauth2/authorize?client_id=$key&response_type=code&token_access_type=offline';
+                              await _openExternalUrl(authUrl);
+                              setDialogState(() {
+                                isError = false;
+                                statusMsg =
+                                    'Opening Dropbox authorization in browser (link copied to clipboard). '
+                                    'Click "Allow", then copy the code Dropbox provides and paste it into Step 2 below.';
+                              });
+                            },
                           ),
                         ),
                         const SizedBox(height: 10),
@@ -969,14 +1062,14 @@ class _MainScreenState extends State<MainScreen> {
                               child: TextField(
                                 controller: authCodeController,
                                 decoration: const InputDecoration(
-                                  labelText: 'Or Exchange Authorization Code',
+                                  labelText: '2. Paste Authorization Code Here',
                                   border: OutlineInputBorder(),
                                   isDense: true,
                                 ),
                               ),
                             ),
                             const SizedBox(width: 8),
-                            OutlinedButton(
+                            ElevatedButton(
                               onPressed: isWorking
                                   ? null
                                   : () async {
@@ -1006,7 +1099,7 @@ class _MainScreenState extends State<MainScreen> {
                                         setDialogState(() {
                                           isWorking = false;
                                           isError = false;
-                                          statusMsg = 'OAuth token exchanged and saved!';
+                                          statusMsg = 'Success! OAuth refresh token exchanged and saved. Permanent auto-sync is ready.';
                                         });
                                       } catch (e) {
                                         setDialogState(() {
@@ -1016,9 +1109,19 @@ class _MainScreenState extends State<MainScreen> {
                                         });
                                       }
                                     },
-                              child: const Text('Exchange'),
+                              child: const Text('Exchange & Save'),
                             ),
                           ],
+                        ),
+                        const SizedBox(height: 10),
+                        TextField(
+                          controller: refreshTokenController,
+                          obscureText: true,
+                          decoration: const InputDecoration(
+                            labelText: 'OAuth2 Refresh Token (if already obtained)',
+                            border: OutlineInputBorder(),
+                            isDense: true,
+                          ),
                         ),
                         const SizedBox(height: 8),
                       ],
@@ -1030,24 +1133,26 @@ class _MainScreenState extends State<MainScreen> {
                       children: [
                         OutlinedButton.icon(
                           icon: const Icon(Icons.create_new_folder_outlined, size: 16),
-                          label: const Text('Verify / Create /App/Mjolnir'),
+                          label: const Text('Verify Connection & Folder'),
                           onPressed: isWorking
                               ? null
                               : () async {
                                   setDialogState(() {
                                     isWorking = true;
-                                    statusMsg = 'Checking ${folderController.text.trim()} on Dropbox...';
+                                    statusMsg = 'Checking ${dropbox.displayFolderPath} on Dropbox...';
                                     isError = false;
                                   });
                                   try {
                                     await saveSettings();
                                     await dropbox.ensureDirectoryExists();
                                     final files = await dropbox.listJsonFiles();
+                                    tokenController.text = dropbox.config.accessToken;
+                                    refreshTokenController.text = dropbox.config.refreshToken ?? '';
                                     setDialogState(() {
                                       isWorking = false;
                                       isError = false;
                                       statusMsg =
-                                          'Connected! ${dropbox.normalizedFolderPath} is ready (${files.length} JSON file(s) found).';
+                                          'Connected! ${dropbox.displayFolderPath} is ready (${files.length} JSON file(s) found).';
                                     });
                                   } catch (e) {
                                     setDialogState(() {
@@ -1079,10 +1184,12 @@ class _MainScreenState extends State<MainScreen> {
                                       await _vaultManager.exportVaultToDropbox(
                                         fileName: 'mjolnir-servers-$dateStr.json',
                                       );
+                                      tokenController.text = dropbox.config.accessToken;
+                                      refreshTokenController.text = dropbox.config.refreshToken ?? '';
                                       setDialogState(() {
                                         isWorking = false;
                                         isError = false;
-                                        statusMsg = 'Exported to $path on Dropbox!';
+                                        statusMsg = 'Exported to $path in ${dropbox.displayFolderPath}!';
                                       });
                                     } catch (e) {
                                       setDialogState(() {
@@ -1120,6 +1227,8 @@ class _MainScreenState extends State<MainScreen> {
                                       await saveSettings();
                                       final loadedPath =
                                           await _vaultManager.checkAndLoadNewestFromDropbox();
+                                      tokenController.text = dropbox.config.accessToken;
+                                      refreshTokenController.text = dropbox.config.refreshToken ?? '';
                                       if (mounted) setState(() {});
                                       setDialogState(() {
                                         isWorking = false;
@@ -1154,12 +1263,42 @@ class _MainScreenState extends State<MainScreen> {
                             color: isError ? Colors.redAccent : Colors.greenAccent.withAlpha(120),
                           ),
                         ),
-                        child: Text(
-                          statusMsg!,
-                          style: TextStyle(
-                            fontSize: 12,
-                            color: isError ? Colors.redAccent : Colors.greenAccent,
-                          ),
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(
+                              statusMsg!,
+                              style: TextStyle(
+                                fontSize: 12,
+                                color: isError ? Colors.redAccent : Colors.greenAccent,
+                              ),
+                            ),
+                            if (isError &&
+                                (statusMsg!.contains('401') ||
+                                    statusMsg!.contains('expired') ||
+                                    statusMsg!.contains('unauthorized'))) ...[
+                              const SizedBox(height: 8),
+                              Wrap(
+                                spacing: 8,
+                                runSpacing: 4,
+                                children: [
+                                  TextButton.icon(
+                                    style: TextButton.styleFrom(
+                                      visualDensity: VisualDensity.compact,
+                                      foregroundColor: Colors.amberAccent,
+                                      padding: const EdgeInsets.symmetric(horizontal: 4),
+                                    ),
+                                    icon: const Icon(Icons.open_in_new, size: 14),
+                                    label: const Text(
+                                      'Open Dropbox App Console to Generate New Token',
+                                      style: TextStyle(fontSize: 11),
+                                    ),
+                                    onPressed: () => _openExternalUrl('https://www.dropbox.com/developers/apps'),
+                                  ),
+                                ],
+                              ),
+                            ],
+                          ],
                         ),
                       ),
                     ],
@@ -1177,7 +1316,15 @@ class _MainScreenState extends State<MainScreen> {
                     ? null
                     : () async {
                         await saveSettings();
-                        if (!_vaultManager.isUnlocked && autoSync && dropbox.config.isConfigured) {
+                        if (_vaultManager.isUnlocked) {
+                          if (autoSync && dropbox.config.isConfigured) {
+                            try {
+                              await _vaultManager.exportVaultToDropbox(fileName: 'servers.json');
+                            } catch (e) {
+                              debugPrint('Initial sync on save settings: $e');
+                            }
+                          }
+                        } else if (autoSync && dropbox.config.isConfigured) {
                           try {
                             await _vaultManager.checkAndLoadNewestFromDropbox();
                           } catch (_) {}
@@ -1520,7 +1667,7 @@ class _MainScreenState extends State<MainScreen> {
                     dense: true,
                     contentPadding: EdgeInsets.zero,
                     leading: Icon(Icons.cloud_download_outlined, size: 18, color: scheme.accentColor),
-                    title: const Text('Import Newest from Dropbox (/App/Mjolnir)'),
+                    title: const Text('Import Newest from Dropbox (All files / Apps / Mjolnir)'),
                   ),
                 ),
               ],
@@ -1548,7 +1695,7 @@ class _MainScreenState extends State<MainScreen> {
                     dense: true,
                     contentPadding: EdgeInsets.zero,
                     leading: Icon(Icons.cloud_upload_outlined, size: 18, color: scheme.accentColor),
-                    title: const Text('Export to Dropbox (/App/Mjolnir)'),
+                    title: const Text('Export to Dropbox (All files / Apps / Mjolnir)'),
                   ),
                 ),
               ],
@@ -1561,7 +1708,7 @@ class _MainScreenState extends State<MainScreen> {
                     ? Colors.greenAccent
                     : null,
               ),
-              tooltip: 'Dropbox API Settings & Sync (/App/Mjolnir)',
+              tooltip: 'Dropbox API Settings & Sync (All files / Apps / Mjolnir)',
               onPressed: _showDropboxDialog,
             ),
             IconButton(
@@ -1700,8 +1847,8 @@ class _MainScreenState extends State<MainScreen> {
                 ),
                 label: Text(
                   _vaultManager.dropboxService.config.isConfigured
-                      ? 'Dropbox API Connected (${_vaultManager.dropboxService.normalizedFolderPath})'
-                      : 'Configure Dropbox API (/App/Mjolnir)',
+                      ? 'Dropbox API Connected (${_vaultManager.dropboxService.displayFolderPath})'
+                      : 'Configure Dropbox API (All files / Apps / Mjolnir)',
                   style: const TextStyle(fontSize: 12),
                 ),
                 onPressed: _showDropboxDialog,

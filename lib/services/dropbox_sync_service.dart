@@ -18,7 +18,7 @@ class DropboxConfig {
     this.appKey,
     this.appSecret,
     this.refreshToken,
-    this.folderPath = '/App/Mjolnir',
+    this.folderPath = '',
     this.autoSyncOnLoadAndSave = true,
   });
 
@@ -37,13 +37,21 @@ class DropboxConfig {
       };
 
   factory DropboxConfig.fromJson(Map<String, dynamic> json) {
-    final rawFolder = (json['folder_path'] as String?)?.trim() ?? '/App/Mjolnir';
+    final rawFolder = (json['folder_path'] as String?)?.trim() ?? '';
+    // Automatically migrate legacy '/App/Mjolnir' or '/App' to root ''
+    final isLegacy = rawFolder == '/App/Mjolnir' ||
+        rawFolder == '/App' ||
+        rawFolder == 'App/Mjolnir' ||
+        rawFolder == 'App' ||
+        rawFolder == '/Apps/Mjolnir' ||
+        rawFolder == 'Apps/Mjolnir' ||
+        rawFolder == '/';
     return DropboxConfig(
       accessToken: json['access_token'] as String? ?? '',
       appKey: json['app_key'] as String?,
       appSecret: json['app_secret'] as String?,
       refreshToken: json['refresh_token'] as String?,
-      folderPath: rawFolder.isEmpty ? '/App/Mjolnir' : rawFolder,
+      folderPath: isLegacy ? '' : rawFolder,
       autoSyncOnLoadAndSave: json['auto_sync'] as bool? ?? true,
     );
   }
@@ -66,14 +74,33 @@ class DropboxSyncService {
 
   DropboxConfig get config => _config;
 
+  /// Returns the API folder path (empty string for root of the app folder, or `/subfolder`).
   String get normalizedFolderPath {
     var path = _config.folderPath.trim();
-    if (path.isEmpty) return '/App/Mjolnir';
+    if (path.isEmpty ||
+        path == '/' ||
+        path == '/App/Mjolnir' ||
+        path == '/App' ||
+        path == 'App/Mjolnir' ||
+        path == 'App' ||
+        path == '/Apps/Mjolnir' ||
+        path == 'Apps/Mjolnir') {
+      return '';
+    }
     if (!path.startsWith('/')) path = '/$path';
     if (path.length > 1 && path.endsWith('/')) {
       path = path.substring(0, path.length - 1);
     }
     return path;
+  }
+
+  /// User-friendly display of the Dropbox folder path.
+  String get displayFolderPath {
+    final norm = normalizedFolderPath;
+    if (norm.isEmpty) {
+      return 'All files / Apps / Mjolnir';
+    }
+    return 'All files / Apps / Mjolnir$norm';
   }
 
   Future<File> _getConfigFile() async {
@@ -211,23 +238,32 @@ class DropboxSyncService {
     }
   }
 
-  /// Ensures `/App/Mjolnir` (or configured folderPath) exists on Dropbox.
+  /// Ensures the configured subfolder exists on Dropbox.
+  /// Root app folder (All files / Apps / Mjolnir) always exists.
   Future<void> ensureDirectoryExists() async {
-    var token = await _getValidAccessToken();
     final folder = normalizedFolderPath;
+    if (folder.isEmpty || folder == '/') {
+      return;
+    }
+    var token = await _getValidAccessToken();
 
     Future<HttpClientResponse> sendRequest(String bearer) async {
       final client = HttpClient();
-      final req = await client.postUrl(
-        Uri.parse('https://api.dropboxapi.com/2/files/create_folder_v2'),
-      );
-      req.headers.set(HttpHeaders.authorizationHeader, 'Bearer $bearer');
-      req.headers.set(HttpHeaders.contentTypeHeader, 'application/json');
-      req.add(utf8.encode(jsonEncode({
-        'path': folder,
-        'autorename': false,
-      })));
-      return await req.close();
+      try {
+        final req = await client.postUrl(
+          Uri.parse('https://api.dropboxapi.com/2/files/create_folder_v2'),
+        );
+        req.headers.set(HttpHeaders.authorizationHeader, 'Bearer $bearer');
+        req.headers.set(HttpHeaders.contentTypeHeader, 'application/json');
+        req.add(utf8.encode(jsonEncode({
+          'path': folder,
+          'autorename': false,
+        })));
+        return await req.close();
+      } catch (_) {
+        client.close();
+        rethrow;
+      }
     }
 
     var resp = await sendRequest(token);
@@ -242,10 +278,17 @@ class DropboxSyncService {
     if (resp.statusCode == 409 && respBody.contains('conflict')) {
       return;
     }
+    if (resp.statusCode == 401) {
+      throw Exception(
+        'Dropbox Access Token expired or unauthorized (401). '
+        'Developer Console tokens expire after 4 hours. '
+        'Generate a fresh token in the Dropbox Developer Console or configure an OAuth2 refresh token for permanent sync.',
+      );
+    }
     throw Exception('Failed to create Dropbox directory $folder (${resp.statusCode}): $respBody');
   }
 
-  /// Lists all `.json` files in `/App/Mjolnir`, sorted by `server_modified` descending (newest first).
+  /// Lists all `.json` files in the Dropbox folder, sorted by `server_modified` descending (newest first).
   Future<List<DropboxFileMetadata>> listJsonFiles() async {
     await ensureDirectoryExists();
     var token = await _getValidAccessToken();
@@ -253,17 +296,22 @@ class DropboxSyncService {
 
     Future<HttpClientResponse> sendRequest(String bearer) async {
       final client = HttpClient();
-      final req = await client.postUrl(
-        Uri.parse('https://api.dropboxapi.com/2/files/list_folder'),
-      );
-      req.headers.set(HttpHeaders.authorizationHeader, 'Bearer $bearer');
-      req.headers.set(HttpHeaders.contentTypeHeader, 'application/json');
-      req.add(utf8.encode(jsonEncode({
-        'path': folder,
-        'recursive': false,
-        'include_deleted': false,
-      })));
-      return await req.close();
+      try {
+        final req = await client.postUrl(
+          Uri.parse('https://api.dropboxapi.com/2/files/list_folder'),
+        );
+        req.headers.set(HttpHeaders.authorizationHeader, 'Bearer $bearer');
+        req.headers.set(HttpHeaders.contentTypeHeader, 'application/json');
+        req.add(utf8.encode(jsonEncode({
+          'path': folder, // Empty string "" is the root of the app folder in Dropbox API v2
+          'recursive': false,
+          'include_deleted': false,
+        })));
+        return await req.close();
+      } catch (_) {
+        client.close();
+        rethrow;
+      }
     }
 
     var resp = await sendRequest(token);
@@ -274,7 +322,14 @@ class DropboxSyncService {
 
     final respBody = await resp.transform(utf8.decoder).join();
     if (resp.statusCode != 200) {
-      throw Exception('Failed to list Dropbox folder $folder (${resp.statusCode}): $respBody');
+      if (resp.statusCode == 401) {
+        throw Exception(
+          'Dropbox Access Token expired or unauthorized (401). '
+          'Developer Console tokens expire after 4 hours. '
+          'Generate a fresh token in the Dropbox Developer Console or configure an OAuth2 refresh token for permanent sync.',
+        );
+      }
+      throw Exception('Failed to list Dropbox folder $displayFolderPath (${resp.statusCode}): $respBody');
     }
 
     final data = jsonDecode(respBody) as Map<String, dynamic>;
@@ -285,7 +340,7 @@ class DropboxSyncService {
       if (entry is Map<String, dynamic> && entry['.tag'] == 'file') {
         final name = entry['name'] as String? ?? '';
         if (name.toLowerCase().endsWith('.json')) {
-          final pathDisplay = entry['path_display'] as String? ?? '$folder/$name';
+          final pathDisplay = entry['path_display'] as String? ?? (folder.isEmpty ? '/$name' : '$folder/$name');
           final modStr = entry['server_modified'] as String?;
           final modified = modStr != null
               ? DateTime.tryParse(modStr)?.toUtc() ?? DateTime.fromMillisecondsSinceEpoch(0, isUtc: true)
@@ -308,15 +363,21 @@ class DropboxSyncService {
   /// Downloads a JSON file from Dropbox by its path.
   Future<String> downloadFileContent(String dropboxFilePath) async {
     var token = await _getValidAccessToken();
+    final cleanPath = dropboxFilePath.startsWith('/') ? dropboxFilePath : '/$dropboxFilePath';
 
     Future<HttpClientResponse> sendRequest(String bearer) async {
       final client = HttpClient();
-      final req = await client.postUrl(
-        Uri.parse('https://content.dropboxapi.com/2/files/download'),
-      );
-      req.headers.set(HttpHeaders.authorizationHeader, 'Bearer $bearer');
-      req.headers.set('Dropbox-API-Arg', jsonEncode({'path': dropboxFilePath}));
-      return await req.close();
+      try {
+        final req = await client.postUrl(
+          Uri.parse('https://content.dropboxapi.com/2/files/download'),
+        );
+        req.headers.set(HttpHeaders.authorizationHeader, 'Bearer $bearer');
+        req.headers.set('Dropbox-API-Arg', jsonEncode({'path': cleanPath}));
+        return await req.close();
+      } catch (_) {
+        client.close();
+        rethrow;
+      }
     }
 
     var resp = await sendRequest(token);
@@ -327,13 +388,20 @@ class DropboxSyncService {
 
     final respBody = await resp.transform(utf8.decoder).join();
     if (resp.statusCode != 200) {
-      throw Exception('Failed to download $dropboxFilePath from Dropbox (${resp.statusCode}): $respBody');
+      if (resp.statusCode == 401) {
+        throw Exception(
+          'Dropbox Access Token expired or unauthorized (401). '
+          'Developer Console tokens expire after 4 hours. '
+          'Generate a fresh token in the Dropbox Developer Console or configure an OAuth2 refresh token for permanent sync.',
+        );
+      }
+      throw Exception('Failed to download $cleanPath from Dropbox (${resp.statusCode}): $respBody');
     }
 
     return respBody;
   }
 
-  /// Downloads the newest valid `SyncVaultFile` from `/App/Mjolnir` on Dropbox, or returns null if none exist.
+  /// Downloads the newest valid `SyncVaultFile` from Dropbox, or returns null if none exist.
   Future<({SyncVaultFile vault, String rawJson, String filePath, DateTime modifiedAt})?> fetchNewestVaultFromDropbox() async {
     if (!_config.isConfigured) return null;
 
@@ -369,34 +437,41 @@ class DropboxSyncService {
     return newest;
   }
 
-  /// Uploads a JSON vault string to `/App/Mjolnir/<fileName>` on Dropbox.
+  /// Uploads a JSON vault string to Dropbox (e.g. `/servers.json` in `All files / Apps / Mjolnir`).
   Future<String> uploadVaultJson(
     String jsonString, {
     String fileName = 'servers.json',
   }) async {
     await ensureDirectoryExists();
     var token = await _getValidAccessToken();
-    final targetPath = '$normalizedFolderPath/$fileName';
+    final folder = normalizedFolderPath;
+    final cleanFileName = fileName.trim().replaceAll(RegExp(r'^/+'), '');
+    final targetPath = folder.isEmpty ? '/$cleanFileName' : '$folder/$cleanFileName';
     final bytes = utf8.encode(jsonString);
 
     Future<HttpClientResponse> sendRequest(String bearer) async {
       final client = HttpClient();
-      final req = await client.postUrl(
-        Uri.parse('https://content.dropboxapi.com/2/files/upload'),
-      );
-      req.headers.set(HttpHeaders.authorizationHeader, 'Bearer $bearer');
-      req.headers.set(HttpHeaders.contentTypeHeader, 'application/octet-stream');
-      req.headers.set(
-        'Dropbox-API-Arg',
-        jsonEncode({
-          'path': targetPath,
-          'mode': 'overwrite',
-          'autorename': false,
-          'mute': false,
-        }),
-      );
-      req.add(bytes);
-      return await req.close();
+      try {
+        final req = await client.postUrl(
+          Uri.parse('https://content.dropboxapi.com/2/files/upload'),
+        );
+        req.headers.set(HttpHeaders.authorizationHeader, 'Bearer $bearer');
+        req.headers.set(HttpHeaders.contentTypeHeader, 'application/octet-stream');
+        req.headers.set(
+          'Dropbox-API-Arg',
+          jsonEncode({
+            'path': targetPath,
+            'mode': 'overwrite',
+            'autorename': false,
+            'mute': false,
+          }),
+        );
+        req.add(bytes);
+        return await req.close();
+      } catch (_) {
+        client.close();
+        rethrow;
+      }
     }
 
     var resp = await sendRequest(token);
@@ -407,6 +482,13 @@ class DropboxSyncService {
 
     final respBody = await resp.transform(utf8.decoder).join();
     if (resp.statusCode != 200) {
+      if (resp.statusCode == 401) {
+        throw Exception(
+          'Dropbox Access Token expired or unauthorized (401). '
+          'Developer Console tokens expire after 4 hours. '
+          'Generate a fresh token in the Dropbox Developer Console or configure an OAuth2 refresh token for permanent sync.',
+        );
+      }
       throw Exception('Failed to upload $targetPath to Dropbox (${resp.statusCode}): $respBody');
     }
 
