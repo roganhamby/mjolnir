@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:file_picker/file_picker.dart';
@@ -2100,9 +2101,40 @@ class _MainScreenState extends State<MainScreen> {
                   onPressed: () => setState(() => _isSidebarCollapsed = false),
                 ),
               Expanded(
-                child: ListView.builder(
+                child: ReorderableListView.builder(
                   scrollDirection: Axis.horizontal,
+                  buildDefaultDragHandles: false,
                   itemCount: _openTabs.length,
+                  onReorder: (int oldIndex, int newIndex) {
+                    setState(() {
+                      if (oldIndex < newIndex) {
+                        newIndex -= 1;
+                      }
+                      final activeTabId = (_activeTabIndex >= 0 && _activeTabIndex < _openTabs.length)
+                          ? _openTabs[_activeTabIndex].id
+                          : null;
+                      final movedTab = _openTabs.removeAt(oldIndex);
+                      _openTabs.insert(newIndex, movedTab);
+                      if (activeTabId != null) {
+                        _activeTabIndex = _openTabs.indexWhere((t) => t.id == activeTabId);
+                      }
+                    });
+                  },
+                  proxyDecorator: (Widget child, int index, Animation<double> animation) {
+                    return AnimatedBuilder(
+                      animation: animation,
+                      builder: (BuildContext context, Widget? child) {
+                        final double elevation = Tween<double>(begin: 0, end: 6).evaluate(animation);
+                        return Material(
+                          color: Colors.transparent,
+                          shadowColor: Colors.black54,
+                          elevation: elevation,
+                          child: child,
+                        );
+                      },
+                      child: child,
+                    );
+                  },
                   itemBuilder: (context, index) {
                     final tab = _openTabs[index];
                     final isActive = index == _activeTabIndex;
@@ -2112,128 +2144,174 @@ class _MainScreenState extends State<MainScreen> {
                         : null;
                     final isTaskOverdue = assignedTask?.isOverdue ?? false;
 
-                    return GestureDetector(
-                      onTap: () => setState(() {
-                        _activeTabIndex = index;
-                      }),
-                      onSecondaryTap: () => _renameAndRecolorTab(tab),
-                      onLongPress: () => _renameAndRecolorTab(tab),
-                      child: Container(
-                        padding: const EdgeInsets.symmetric(horizontal: 12),
-                        decoration: BoxDecoration(
-                          color: isActive ? scheme.panelBackground : scheme.scaffoldBackground,
-                          border: Border(
-                            top: BorderSide(
-                              color: tabHighlightColor,
-                              width: tab.color != null ? 3 : 2,
-                            ),
-                            right: BorderSide(color: scheme.borderColor),
+                    return Container(
+                      key: ValueKey(tab.id),
+                      height: 38,
+                      decoration: BoxDecoration(
+                        color: isActive ? scheme.panelBackground : scheme.scaffoldBackground,
+                        border: Border(
+                          top: BorderSide(
+                            color: tabHighlightColor,
+                            width: tab.color != null ? 3 : 2,
                           ),
+                          right: BorderSide(color: scheme.borderColor),
                         ),
-                        child: Row(
-                          children: [
-                            if (tab.color != null)
-                              Container(
-                                width: 8,
-                                height: 8,
-                                margin: const EdgeInsets.only(right: 6),
-                                decoration: BoxDecoration(
-                                  color: tab.color,
-                                  shape: BoxShape.circle,
-                                ),
-                              ),
-                            Icon(tab.icon, size: 14, color: isActive ? scheme.primaryText : scheme.mutedText),
-                            const SizedBox(width: 8),
-                            Text(
-                              tab.title,
-                              style: TextStyle(
-                                fontSize: 12,
-                                color: isActive ? scheme.primaryText : scheme.mutedText,
-                                fontWeight: isActive ? FontWeight.bold : FontWeight.normal,
-                              ),
-                            ),
-                            if (assignedTask != null) ...[
-                              const SizedBox(width: 8),
-                              Container(
-                                padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
-                                decoration: BoxDecoration(
-                                  color: isTaskOverdue
-                                      ? Colors.redAccent.withAlpha(45)
-                                      : assignedTask.importance.color.withAlpha(35),
-                                  borderRadius: BorderRadius.circular(4),
-                                  border: Border.all(
-                                    color: isTaskOverdue
-                                        ? Colors.redAccent
-                                        : assignedTask.importance.color.withAlpha(140),
-                                    width: 1,
+                      ),
+                      child: Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          ReorderableDragStartListener(
+                            index: index,
+                            child: MouseRegion(
+                              cursor: SystemMouseCursors.click,
+                              child: Listener(
+                                onPointerDown: (e) {
+                                  if (e.buttons == kPrimaryMouseButton) {
+                                    if (_activeTabIndex != index) {
+                                      setState(() {
+                                        _activeTabIndex = index;
+                                      });
+                                    }
+                                  }
+                                },
+                                child: GestureDetector(
+                                  behavior: HitTestBehavior.opaque,
+                                  onTap: () {
+                                    if (_activeTabIndex != index) {
+                                      setState(() {
+                                        _activeTabIndex = index;
+                                      });
+                                    }
+                                  },
+                                  onSecondaryTap: () => _renameAndRecolorTab(tab),
+                                  onLongPress: () => _renameAndRecolorTab(tab),
+                                  child: Container(
+                                    color: Colors.transparent,
+                                    padding: const EdgeInsets.only(left: 12, right: 6),
+                                    alignment: Alignment.center,
+                                    child: Row(
+                                      mainAxisSize: MainAxisSize.min,
+                                      children: [
+                                        if (tab.color != null)
+                                          Container(
+                                            width: 8,
+                                            height: 8,
+                                            margin: const EdgeInsets.only(right: 6),
+                                            decoration: BoxDecoration(
+                                              color: tab.color,
+                                              shape: BoxShape.circle,
+                                            ),
+                                          ),
+                                        Icon(tab.icon, size: 14, color: isActive ? scheme.primaryText : scheme.mutedText),
+                                        const SizedBox(width: 8),
+                                        Text(
+                                          tab.title,
+                                          style: TextStyle(
+                                            fontSize: 12,
+                                            color: isActive ? scheme.primaryText : scheme.mutedText,
+                                            fontWeight: isActive ? FontWeight.bold : FontWeight.normal,
+                                          ),
+                                        ),
+                                        if (assignedTask != null) ...[
+                                          const SizedBox(width: 8),
+                                          Container(
+                                            padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                                            decoration: BoxDecoration(
+                                              color: isTaskOverdue
+                                                  ? Colors.redAccent.withAlpha(45)
+                                                  : assignedTask.importance.color.withAlpha(35),
+                                              borderRadius: BorderRadius.circular(4),
+                                              border: Border.all(
+                                                color: isTaskOverdue
+                                                    ? Colors.redAccent
+                                                    : assignedTask.importance.color.withAlpha(140),
+                                                width: 1,
+                                              ),
+                                            ),
+                                            child: Row(
+                                              mainAxisSize: MainAxisSize.min,
+                                              children: [
+                                                Icon(
+                                                  isTaskOverdue ? Icons.warning_amber_rounded : Icons.task_alt,
+                                                  size: 11,
+                                                  color: isTaskOverdue
+                                                      ? Colors.redAccent
+                                                      : assignedTask.importance.color,
+                                                ),
+                                                const SizedBox(width: 4),
+                                                ConstrainedBox(
+                                                  constraints: const BoxConstraints(maxWidth: 160),
+                                                  child: Text(
+                                                    assignedTask.title,
+                                                    style: TextStyle(
+                                                      fontSize: 11,
+                                                      fontWeight: FontWeight.w600,
+                                                      color: isTaskOverdue ? Colors.redAccent : scheme.primaryText,
+                                                    ),
+                                                    overflow: TextOverflow.ellipsis,
+                                                  ),
+                                                ),
+                                                if (assignedTask.subtasks.isNotEmpty) ...[
+                                                  const SizedBox(width: 5),
+                                                  Text(
+                                                    '(${assignedTask.completedSubtaskCount}/${assignedTask.subtasks.length})',
+                                                    style: TextStyle(
+                                                      fontSize: 10,
+                                                      fontWeight: FontWeight.w600,
+                                                      color: assignedTask.completedSubtaskCount ==
+                                                              assignedTask.subtasks.length
+                                                          ? Colors.greenAccent
+                                                          : scheme.mutedText,
+                                                    ),
+                                                  ),
+                                                ],
+                                                if (assignedTask.dueDate != null) ...[
+                                                  const SizedBox(width: 5),
+                                                  Text(
+                                                    DateFormat('HH:mm').format(assignedTask.dueDate!.toLocal()),
+                                                    style: TextStyle(
+                                                      fontSize: 10,
+                                                      fontWeight: isTaskOverdue ? FontWeight.bold : FontWeight.normal,
+                                                      color: isTaskOverdue
+                                                          ? Colors.redAccent
+                                                          : scheme.mutedText,
+                                                    ),
+                                                  ),
+                                                ],
+                                              ],
+                                            ),
+                                          ),
+                                        ],
+                                      ],
+                                    ),
                                   ),
                                 ),
-                                child: Row(
-                                  mainAxisSize: MainAxisSize.min,
-                                  children: [
-                                    Icon(
-                                      isTaskOverdue ? Icons.warning_amber_rounded : Icons.task_alt,
-                                      size: 11,
-                                      color: isTaskOverdue
-                                          ? Colors.redAccent
-                                          : assignedTask.importance.color,
-                                    ),
-                                    const SizedBox(width: 4),
-                                    ConstrainedBox(
-                                      constraints: const BoxConstraints(maxWidth: 160),
-                                      child: Text(
-                                        assignedTask.title,
-                                        style: TextStyle(
-                                          fontSize: 11,
-                                          fontWeight: FontWeight.w600,
-                                          color: isTaskOverdue ? Colors.redAccent : scheme.primaryText,
-                                        ),
-                                        overflow: TextOverflow.ellipsis,
-                                      ),
-                                    ),
-                                    if (assignedTask.subtasks.isNotEmpty) ...[
-                                      const SizedBox(width: 5),
-                                      Text(
-                                        '(${assignedTask.completedSubtaskCount}/${assignedTask.subtasks.length})',
-                                        style: TextStyle(
-                                          fontSize: 10,
-                                          fontWeight: FontWeight.w600,
-                                          color: assignedTask.completedSubtaskCount ==
-                                                  assignedTask.subtasks.length
-                                              ? Colors.greenAccent
-                                              : scheme.mutedText,
-                                        ),
-                                      ),
-                                    ],
-                                    if (assignedTask.dueDate != null) ...[
-                                      const SizedBox(width: 5),
-                                      Text(
-                                        DateFormat('HH:mm').format(assignedTask.dueDate!.toLocal()),
-                                        style: TextStyle(
-                                          fontSize: 10,
-                                          fontWeight: isTaskOverdue ? FontWeight.bold : FontWeight.normal,
-                                          color: isTaskOverdue
-                                              ? Colors.redAccent
-                                              : scheme.mutedText,
-                                        ),
-                                      ),
-                                    ],
-                                  ],
-                                ),
                               ),
-                            ],
-                            const SizedBox(width: 6),
-                            InkWell(
+                            ),
+                          ),
+                          Padding(
+                            padding: const EdgeInsets.only(right: 4),
+                            child: InkWell(
+                              borderRadius: BorderRadius.circular(3),
                               onTap: () => _renameAndRecolorTab(tab),
-                              child: Icon(Icons.edit, size: 12, color: scheme.mutedText),
+                              child: Padding(
+                                padding: const EdgeInsets.all(4.0),
+                                child: Icon(Icons.edit, size: 12, color: scheme.mutedText),
+                              ),
                             ),
-                            const SizedBox(width: 6),
-                            InkWell(
+                          ),
+                          Padding(
+                            padding: const EdgeInsets.only(right: 8),
+                            child: InkWell(
+                              borderRadius: BorderRadius.circular(3),
                               onTap: () => _closeTab(tab.id),
-                              child: Icon(Icons.close, size: 14, color: scheme.mutedText),
+                              child: Padding(
+                                padding: const EdgeInsets.all(4.0),
+                                child: Icon(Icons.close, size: 14, color: scheme.mutedText),
+                              ),
                             ),
-                          ],
-                        ),
+                          ),
+                        ],
                       ),
                     );
                   },
