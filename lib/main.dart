@@ -7,6 +7,7 @@ import 'package:file_picker/file_picker.dart';
 import 'package:intl/intl.dart';
 import 'models/server_config.dart';
 import 'models/task_item.dart';
+import 'models/stored_string_item.dart';
 import 'services/dropbox_sync_service.dart';
 import 'services/sync_storage_provider.dart';
 import 'services/vault_manager.dart';
@@ -96,11 +97,13 @@ class TabItem {
 class MainScreen extends StatefulWidget {
   final AppColorScheme currentColorScheme;
   final ValueChanged<String>? onColorSchemeChanged;
+  final VaultManager? vaultManager;
 
   const MainScreen({
     super.key,
     this.currentColorScheme = AppColorSchemes.mjolnirAmber,
     this.onColorSchemeChanged,
+    this.vaultManager,
   });
 
   @override
@@ -110,6 +113,7 @@ class MainScreen extends StatefulWidget {
 class _MainScreenState extends State<MainScreen> {
   late final VaultManager _vaultManager;
   final SshService _sshService = SshService();
+  final GlobalKey _pasteboardButtonKey = GlobalKey();
 
   final List<TabItem> _openTabs = [];
   int _activeTabIndex = -1;
@@ -134,10 +138,14 @@ class _MainScreenState extends State<MainScreen> {
   @override
   void initState() {
     super.initState();
-    _vaultManager = VaultManager(storageProvider: LocalFileSyncProvider());
-    _vaultManager.init().then((_) {
-      if (mounted) setState(() {});
-    });
+    if (widget.vaultManager != null) {
+      _vaultManager = widget.vaultManager!;
+    } else {
+      _vaultManager = VaultManager(storageProvider: LocalFileSyncProvider());
+      _vaultManager.init().then((_) {
+        if (mounted) setState(() {});
+      });
+    }
     _dueDateTimer = Timer.periodic(const Duration(seconds: 5), (_) {
       if (mounted && _vaultManager.isUnlocked && _vaultManager.tasks.isNotEmpty) {
         setState(() {});
@@ -261,7 +269,7 @@ class _MainScreenState extends State<MainScreen> {
       _openTabs.add(
         TabItem(
           id: 'strings-${DateTime.now().millisecondsSinceEpoch}',
-          title: 'Stored Strings',
+          title: 'Pasteboard',
           icon: Icons.content_paste,
           color: Colors.tealAccent,
           type: 'strings',
@@ -360,6 +368,157 @@ class _MainScreenState extends State<MainScreen> {
       if (val == 'edit') _showAddOrEditServerDialog(server);
       if (val == 'delete') _confirmDeleteServer(server);
     });
+  }
+
+  void _showPasteboardContextMenu([Offset? globalPos]) async {
+    final overlay = Overlay.of(context).context.findRenderObject() as RenderBox;
+    final scheme = AppColorScheme.of(context);
+    final items = _vaultManager.storedStrings;
+
+    Offset pos;
+    if (globalPos != null) {
+      pos = globalPos;
+    } else {
+      final btnBox = _pasteboardButtonKey.currentContext?.findRenderObject() as RenderBox?;
+      if (btnBox != null && btnBox.hasSize) {
+        pos = btnBox.localToGlobal(Offset(0, btnBox.size.height));
+      } else {
+        pos = Offset(overlay.size.width - 250, 50);
+      }
+    }
+
+    final menuItems = <PopupMenuEntry<String>>[];
+
+    if (items.isEmpty) {
+      menuItems.add(
+        const PopupMenuItem<String>(
+          enabled: false,
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(Icons.info_outline, size: 16),
+              SizedBox(width: 8),
+              Text('Pasteboard is empty'),
+            ],
+          ),
+        ),
+      );
+    } else {
+      for (final item in items) {
+        final hasLabel = item.label.trim().isNotEmpty;
+        final cleanValue = item.value
+            .replaceAll('\r\n', ' ')
+            .replaceAll('\n', ' ')
+            .replaceAll('\t', ' ')
+            .trim();
+        final displayValue = cleanValue.length > 40
+            ? '${cleanValue.substring(0, 40)}...'
+            : cleanValue;
+
+        menuItems.add(
+          PopupMenuItem<String>(
+            value: item.id,
+            child: Row(
+              children: [
+                Icon(Icons.content_paste, size: 16, color: scheme.accentColor),
+                const SizedBox(width: 10),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      if (hasLabel)
+                        Text(
+                          item.label.trim(),
+                          style: TextStyle(
+                            fontSize: 12,
+                            fontWeight: FontWeight.bold,
+                            color: scheme.primaryText,
+                          ),
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                      Text(
+                        displayValue.isEmpty ? '(empty)' : displayValue,
+                        style: TextStyle(
+                          fontSize: hasLabel ? 11 : 12,
+                          fontFamily: 'monospace',
+                          color: hasLabel ? scheme.mutedText : scheme.primaryText,
+                        ),
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                    ],
+                  ),
+                ),
+              ],
+            ),
+          ),
+        );
+      }
+    }
+
+    menuItems.add(const PopupMenuDivider());
+    menuItems.add(
+      PopupMenuItem<String>(
+        value: '__open_pasteboard_tab__',
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(Icons.tab, size: 16, color: scheme.accentColor),
+            const SizedBox(width: 10),
+            Text(
+              'Open Pasteboard Tab',
+              style: TextStyle(
+                fontSize: 12,
+                color: scheme.primaryText,
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+
+    final selectedId = await showMenu<String>(
+      context: context,
+      position: RelativeRect.fromRect(
+        pos & const Size(40, 40),
+        Offset.zero & overlay.size,
+      ),
+      items: menuItems,
+      constraints: const BoxConstraints(minWidth: 220, maxWidth: 360, maxHeight: 420),
+    );
+
+    if (selectedId == null || !mounted) return;
+
+    if (selectedId == '__open_pasteboard_tab__') {
+      _openStoredStringsTab();
+      return;
+    }
+
+    StoredStringItem? selectedItem;
+    for (final s in items) {
+      if (s.id == selectedId) {
+        selectedItem = s;
+        break;
+      }
+    }
+
+    if (selectedItem != null) {
+      await Clipboard.setData(ClipboardData(text: selectedItem.value));
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).clearSnackBars();
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            selectedItem.label.trim().isNotEmpty
+                ? 'Copied "${selectedItem.label.trim()}" to clipboard.'
+                : 'Copied string to clipboard.',
+          ),
+          duration: const Duration(seconds: 2),
+        ),
+      );
+    }
   }
 
   Future<void> _closeTab(String tabId) async {
@@ -1312,22 +1471,30 @@ class _MainScreenState extends State<MainScreen> {
               ),
               onPressed: _openTaskManagerTab,
             ),
-            TextButton.icon(
-              icon: Icon(
-                Icons.content_paste,
-                size: 18,
-                color: scheme.accentColor,
-              ),
-              label: Text(
-                _vaultManager.storedStrings.isEmpty
-                    ? 'Strings'
-                    : 'Strings (${_vaultManager.storedStrings.length})',
-                style: TextStyle(
-                  fontSize: 12,
-                  color: scheme.primaryText,
+            GestureDetector(
+              key: _pasteboardButtonKey,
+              behavior: HitTestBehavior.opaque,
+              onSecondaryTapUp: (details) =>
+                  _showPasteboardContextMenu(details.globalPosition),
+              onLongPressStart: (details) =>
+                  _showPasteboardContextMenu(details.globalPosition),
+              child: TextButton.icon(
+                icon: Icon(
+                  Icons.content_paste,
+                  size: 18,
+                  color: scheme.accentColor,
                 ),
+                label: Text(
+                  _vaultManager.storedStrings.isEmpty
+                      ? 'Pasteboard'
+                      : 'Pasteboard (${_vaultManager.storedStrings.length})',
+                  style: TextStyle(
+                    fontSize: 12,
+                    color: scheme.primaryText,
+                  ),
+                ),
+                onPressed: _openStoredStringsTab,
               ),
-              onPressed: _openStoredStringsTab,
             ),
             _buildColorSchemeMenuButton(scheme),
             PopupMenuButton<String>(
@@ -1754,7 +1921,7 @@ class _MainScreenState extends State<MainScreen> {
                 ),
                 OutlinedButton.icon(
                   icon: Icon(Icons.content_paste, size: 16, color: scheme.accentColor),
-                  label: const Text('Open Stored Strings'),
+                  label: const Text('Open Pasteboard'),
                   onPressed: _openStoredStringsTab,
                 ),
               ],

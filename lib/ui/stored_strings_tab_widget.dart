@@ -202,7 +202,7 @@ class _StoredStringsTabWidgetState extends State<StoredStringsTabWidget> {
                       Icon(Icons.content_paste, color: scheme.accentColor, size: 18),
                       const SizedBox(width: 8),
                       Text(
-                        'Stored Strings (${widget.storedStrings.length})',
+                        'Pasteboard (${widget.storedStrings.length})',
                         style: TextStyle(
                           fontSize: 14,
                           fontWeight: FontWeight.bold,
