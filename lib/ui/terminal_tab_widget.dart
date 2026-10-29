@@ -15,6 +15,7 @@ import '../services/ssh_service.dart';
 import '../theme/ansi_themes.dart';
 import '../theme/app_color_schemes.dart';
 import 'task_manager_tab_widget.dart';
+import 'app_notification.dart';
 
 class TerminalTabWidget extends StatefulWidget {
   final ServerConfig server;
@@ -726,11 +727,10 @@ class _TerminalTabWidgetState extends State<TerminalTabWidget>
     final selection = _terminalController.selection;
     if (selection == null) {
       if (showNotification && mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text('No text selected in terminal'),
-            duration: Duration(seconds: 1),
-          ),
+        AppNotification.show(
+          context,
+          message: 'No text selected in terminal',
+          duration: const Duration(seconds: 1),
         );
       }
       _requestTerminalFocus();
@@ -741,11 +741,10 @@ class _TerminalTabWidgetState extends State<TerminalTabWidget>
     if (text.isNotEmpty) {
       await Clipboard.setData(ClipboardData(text: text));
       if (showNotification && mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text('Copied ${text.length} characters to clipboard'),
-            duration: const Duration(seconds: 1),
-          ),
+        AppNotification.show(
+          context,
+          message: 'Copied ${text.length} characters to clipboard',
+          duration: const Duration(seconds: 1),
         );
       }
     }
@@ -1019,20 +1018,17 @@ Started: ${DateTime.now().toLocal().toString()}
       });
 
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text('Screen logging started: ${p.basename(selectedPath)}'),
-            duration: const Duration(seconds: 2),
-          ),
+        AppNotification.show(
+          context,
+          message: 'Screen logging started: ${p.basename(selectedPath)}',
+          duration: const Duration(seconds: 2),
         );
       }
     } catch (e) {
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text('Failed to start screen logging: $e'),
-            backgroundColor: Colors.redAccent,
-          ),
+        AppNotification.error(
+          context,
+          'Failed to start screen logging: $e',
         );
       }
     }
@@ -1061,37 +1057,33 @@ Total Characters Logged: $_screenLogBytesWritten
 
     if (mounted && path != null) {
       final isDesktop = Platform.isMacOS || Platform.isWindows || Platform.isLinux;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text('Screen log saved (${(_screenLogBytesWritten / 1024).toStringAsFixed(1)} KB): ${p.basename(path)}'),
-          action: isDesktop
-              ? SnackBarAction(
-                  label: Platform.isMacOS ? 'Show in Finder' : 'Open Folder',
-                  onPressed: () {
-                    if (Platform.isMacOS) {
-                      Process.run('open', ['-R', path]);
-                    } else if (Platform.isWindows) {
-                      Process.run('explorer.exe', ['/select,$path']);
-                    } else if (Platform.isLinux) {
-                      Process.run('xdg-open', [File(path).parent.path]);
-                    }
-                  },
-                )
-              : SnackBarAction(
-                  label: 'Export Log',
-                  onPressed: () async {
-                    try {
-                      final bytes = await File(path).readAsBytes();
-                      await FilePicker.saveFile(
-                        dialogTitle: 'Save Screen Log As',
-                        fileName: p.basename(path),
-                        bytes: bytes,
-                      );
-                    } catch (_) {}
-                  },
-                ),
-          duration: const Duration(seconds: 5),
-        ),
+      AppNotification.show(
+        context,
+        message:
+            'Screen log saved (${(_screenLogBytesWritten / 1024).toStringAsFixed(1)} KB): ${p.basename(path)}',
+        actionLabel: isDesktop
+            ? (Platform.isMacOS ? 'Show in Finder' : 'Open Folder')
+            : 'Export Log',
+        onAction: () {
+          if (Platform.isMacOS) {
+            Process.run('open', ['-R', path]);
+          } else if (Platform.isWindows) {
+            Process.run('explorer.exe', ['/select,$path']);
+          } else if (Platform.isLinux) {
+            Process.run('xdg-open', [File(path).parent.path]);
+          } else {
+            try {
+              File(path).readAsBytes().then((bytes) {
+                FilePicker.saveFile(
+                  dialogTitle: 'Save Screen Log As',
+                  fileName: p.basename(path),
+                  bytes: bytes,
+                );
+              });
+            } catch (_) {}
+          }
+        },
+        duration: const Duration(seconds: 5),
       );
     }
   }

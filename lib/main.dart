@@ -18,6 +18,7 @@ import 'ui/sftp_tab_widget.dart';
 import 'ui/task_manager_tab_widget.dart';
 import 'ui/stored_strings_tab_widget.dart';
 import 'ui/server_edit_dialog.dart';
+import 'ui/app_notification.dart';
 import 'theme/ansi_themes.dart';
 import 'theme/app_color_schemes.dart';
 import 'package:xterm/xterm.dart';
@@ -60,6 +61,7 @@ class _MyAppState extends State<MyApp> {
   Widget build(BuildContext context) {
     final themeData = _colorScheme.toThemeData();
     return MaterialApp(
+      navigatorKey: AppNotification.navigatorKey,
       title: 'Mjölnir',
       debugShowCheckedModeBanner: false,
       themeMode: _colorScheme.isDark ? ThemeMode.dark : ThemeMode.light,
@@ -508,16 +510,12 @@ class _MainScreenState extends State<MainScreen> {
     if (selectedItem != null) {
       await Clipboard.setData(ClipboardData(text: selectedItem.value));
       if (!mounted) return;
-      ScaffoldMessenger.of(context).clearSnackBars();
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text(
-            selectedItem.label.trim().isNotEmpty
-                ? 'Copied "${selectedItem.label.trim()}" to clipboard.'
-                : 'Copied string to clipboard.',
-          ),
-          duration: const Duration(seconds: 2),
-        ),
+      AppNotification.show(
+        context,
+        message: selectedItem.label.trim().isNotEmpty
+            ? 'Copied "${selectedItem.label.trim()}" to clipboard.'
+            : 'Copied string to clipboard.',
+        duration: const Duration(seconds: 2),
       );
     }
   }
@@ -721,14 +719,16 @@ class _MainScreenState extends State<MainScreen> {
       );
 
       if (savedUri != null && mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('Vault exported successfully.')),
+        AppNotification.success(
+          context,
+          'Vault exported successfully.',
         );
       }
     } catch (e) {
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Export failed: $e'), backgroundColor: Colors.red),
+        AppNotification.error(
+          context,
+          'Export failed: $e',
         );
       }
     }
@@ -747,17 +747,16 @@ class _MainScreenState extends State<MainScreen> {
       final path = await _vaultManager.exportVaultToDropbox(fileName: 'servers.json');
       await _vaultManager.exportVaultToDropbox(fileName: 'mjolnir-servers-$dateStr.json');
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Exported JSON vault to Dropbox ($path in ${dropbox.displayFolderPath}).')),
+        AppNotification.show(
+          context,
+          message: 'Exported JSON vault to Dropbox ($path in ${dropbox.displayFolderPath}).',
         );
       }
     } catch (e) {
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text('Dropbox export failed: $e'),
-            backgroundColor: Colors.red,
-          ),
+        AppNotification.error(
+          context,
+          'Dropbox export failed: $e',
         );
       }
     }
@@ -818,21 +817,17 @@ class _MainScreenState extends State<MainScreen> {
         );
         if (mounted) {
           setState(() {});
-          ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(
-              content: Text(
+          AppNotification.show(
+            context,
+            message:
                 'Imported newest vault from Dropbox (${result.filePath}): ${result.serverCount} server(s) merged.',
-              ),
-            ),
           );
         }
       } catch (e) {
         if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(
-              content: Text('Dropbox import failed: $e'),
-              backgroundColor: Colors.red,
-            ),
+          AppNotification.error(
+            context,
+            'Dropbox import failed: $e',
           );
         }
       }
@@ -1414,14 +1409,11 @@ class _MainScreenState extends State<MainScreen> {
           _masterPasswordController.clear();
           if (mounted) {
             setState(() {});
-            ScaffoldMessenger.of(context).showSnackBar(
-              SnackBar(
-                content: Text(
-                  res.dropboxConfigured
-                      ? 'Station ready: imported ${res.serverCount} server(s) and restored Dropbox API credentials.'
-                      : 'Station ready: imported ${res.serverCount} server(s).',
-                ),
-              ),
+            AppNotification.show(
+              context,
+              message: res.dropboxConfigured
+                  ? 'Station ready: imported ${res.serverCount} server(s) and restored Dropbox API credentials.'
+                  : 'Station ready: imported ${res.serverCount} server(s).',
             );
           }
         } else {
@@ -1430,22 +1422,20 @@ class _MainScreenState extends State<MainScreen> {
           final hasDropboxNow = _vaultManager.dropboxService.config.isConfigured;
           if (mounted) {
             setState(() {});
-            ScaffoldMessenger.of(context).showSnackBar(
-              SnackBar(
-                content: Text(
-                  (!hadDropboxBefore && hasDropboxNow)
-                      ? 'Imported and merged $count server(s) and restored Dropbox API credentials.'
-                      : 'Imported and merged $count server(s).',
-                ),
-              ),
+            AppNotification.show(
+              context,
+              message: (!hadDropboxBefore && hasDropboxNow)
+                  ? 'Imported and merged $count server(s) and restored Dropbox API credentials.'
+                  : 'Imported and merged $count server(s).',
             );
           }
         }
       }
     } catch (e) {
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Import failed: $e'), backgroundColor: Colors.red),
+        AppNotification.error(
+          context,
+          'Import failed: $e',
         );
       }
     }

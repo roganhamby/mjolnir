@@ -4,6 +4,7 @@ import 'package:flutter/services.dart';
 import 'package:uuid/uuid.dart';
 import '../models/stored_string_item.dart';
 import '../theme/app_color_schemes.dart';
+import 'app_notification.dart';
 
 class StoredStringsTabWidget extends StatefulWidget {
   final List<StoredStringItem> storedStrings;
@@ -71,16 +72,12 @@ class _StoredStringsTabWidgetState extends State<StoredStringsTabWidget> {
       setState(() {
         _copiedId = item.id;
       });
-      ScaffoldMessenger.of(context).clearSnackBars();
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text(
-            item.label.isNotEmpty
-                ? 'Copied "${item.label}" to clipboard.'
-                : 'Copied string to clipboard.',
-          ),
-          duration: const Duration(seconds: 2),
-        ),
+      AppNotification.show(
+        context,
+        message: item.label.isNotEmpty
+            ? 'Copied "${item.label}" to clipboard.'
+            : 'Copied string to clipboard.',
+        duration: const Duration(seconds: 2),
       );
       _copiedResetTimer = Timer(const Duration(seconds: 2), () {
         if (mounted) {

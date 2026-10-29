@@ -12,6 +12,7 @@ import '../models/server_config.dart';
 import '../models/task_item.dart';
 import '../services/ssh_service.dart';
 import 'task_manager_tab_widget.dart';
+import 'app_notification.dart';
 
 enum _DragSource { local, remote }
 
@@ -289,14 +290,16 @@ class _SftpTabWidgetState extends State<SftpTabWidget> {
       await newDir.create(recursive: true);
       await _loadLocalDirectory(_currentLocalPath);
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Created local directory "$folderName"')),
+        AppNotification.show(
+          context,
+          message: 'Created local directory "$folderName"',
         );
       }
     } catch (e) {
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Failed to create local directory: $e'), backgroundColor: Colors.red),
+        AppNotification.error(
+          context,
+          'Failed to create local directory: $e',
         );
       }
     }
@@ -332,28 +335,21 @@ class _SftpTabWidgetState extends State<SftpTabWidget> {
     try {
       await entry.entity.delete(recursive: true);
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text(
-              isDir
-                  ? 'Removed local directory "${entry.name}"'
-                  : 'Deleted local file "${entry.name}"',
-            ),
-          ),
+        AppNotification.show(
+          context,
+          message: isDir
+              ? 'Removed local directory "${entry.name}"'
+              : 'Deleted local file "${entry.name}"',
         );
       }
       await _loadLocalDirectory(_currentLocalPath);
     } catch (e) {
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text(
-              isDir
-                  ? 'Failed to remove local directory: $e'
-                  : 'Failed to delete local file: $e',
-            ),
-            backgroundColor: Colors.red,
-          ),
+        AppNotification.error(
+          context,
+          isDir
+              ? 'Failed to remove local directory: $e'
+              : 'Failed to delete local file: $e',
         );
       }
     }
@@ -393,15 +389,17 @@ class _SftpTabWidgetState extends State<SftpTabWidget> {
       final newPath = p.join(p.dirname(entry.path), newName);
       await entry.entity.rename(newPath);
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Renamed "${entry.name}" to "$newName"')),
+        AppNotification.show(
+          context,
+          message: 'Renamed "${entry.name}" to "$newName"',
         );
       }
       await _loadLocalDirectory(_currentLocalPath);
     } catch (e) {
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Failed to rename local item: $e'), backgroundColor: Colors.red),
+        AppNotification.error(
+          context,
+          'Failed to rename local item: $e',
         );
       }
     }
@@ -411,14 +409,11 @@ class _SftpTabWidgetState extends State<SftpTabWidget> {
     final candidates = _localItems.where((e) => e.isDirectory == isDirectory).toList();
     if (candidates.isEmpty) {
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text(
-              isDirectory
-                  ? 'No directories found in the current local folder.'
-                  : 'No files found in the current local folder.',
-            ),
-          ),
+        AppNotification.show(
+          context,
+          message: isDirectory
+              ? 'No directories found in the current local folder.'
+              : 'No files found in the current local folder.',
         );
       }
       return;
@@ -681,14 +676,16 @@ class _SftpTabWidgetState extends State<SftpTabWidget> {
       await _sftpSession!.sftp.mkdir(remoteDir);
       await _loadRemoteDirectory(_currentRemotePath);
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Created remote directory "$folderName"')),
+        AppNotification.show(
+          context,
+          message: 'Created remote directory "$folderName"',
         );
       }
     } catch (e) {
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Failed to create remote directory: $e'), backgroundColor: Colors.red),
+        AppNotification.error(
+          context,
+          'Failed to create remote directory: $e',
         );
       }
     }
@@ -841,24 +838,25 @@ class _SftpTabWidgetState extends State<SftpTabWidget> {
           );
           await _loadRemoteDirectory(_currentRemotePath);
           if (mounted) {
-            ScaffoldMessenger.of(context).showSnackBar(
-              SnackBar(content: Text('Uploaded "${job.name}" to ${job.targetDir}')),
+            AppNotification.show(
+              context,
+              message: 'Uploaded "${job.name}" to ${job.targetDir}',
+              isSuccess: true,
             );
           }
         } on _TransferCancelledException {
           await _loadRemoteDirectory(_currentRemotePath);
           if (mounted) {
-            ScaffoldMessenger.of(context).showSnackBar(
-              SnackBar(content: Text('Cancelled upload of "${job.name}"')),
+            AppNotification.show(
+              context,
+              message: 'Cancelled upload of "${job.name}"',
             );
           }
         } catch (e) {
           if (mounted) {
-            ScaffoldMessenger.of(context).showSnackBar(
-              SnackBar(
-                content: Text('Upload failed for ${job.name}: $e'),
-                backgroundColor: Colors.red,
-              ),
+            AppNotification.error(
+              context,
+              'Upload failed for ${job.name}: $e',
             );
           }
         }
@@ -876,24 +874,25 @@ class _SftpTabWidgetState extends State<SftpTabWidget> {
           );
           await _loadLocalDirectory(_currentLocalPath);
           if (mounted) {
-            ScaffoldMessenger.of(context).showSnackBar(
-              SnackBar(content: Text('Downloaded "${job.name}" to ${job.targetDir}')),
+            AppNotification.show(
+              context,
+              message: 'Downloaded "${job.name}" to ${job.targetDir}',
+              isSuccess: true,
             );
           }
         } on _TransferCancelledException {
           await _loadLocalDirectory(_currentLocalPath);
           if (mounted) {
-            ScaffoldMessenger.of(context).showSnackBar(
-              SnackBar(content: Text('Cancelled download of "${job.name}"')),
+            AppNotification.show(
+              context,
+              message: 'Cancelled download of "${job.name}"',
             );
           }
         } catch (e) {
           if (mounted) {
-            ScaffoldMessenger.of(context).showSnackBar(
-              SnackBar(
-                content: Text('Download failed for ${job.name}: $e'),
-                backgroundColor: Colors.red,
-              ),
+            AppNotification.error(
+              context,
+              'Download failed for ${job.name}: $e',
             );
           }
         }
@@ -904,17 +903,16 @@ class _SftpTabWidgetState extends State<SftpTabWidget> {
           await _downloadRemoteFileWithSaveAs(job);
         } on _TransferCancelledException {
           if (mounted) {
-            ScaffoldMessenger.of(context).showSnackBar(
-              SnackBar(content: Text('Cancelled download of "${job.name}"')),
+            AppNotification.show(
+              context,
+              message: 'Cancelled download of "${job.name}"',
             );
           }
         } catch (e) {
           if (mounted) {
-            ScaffoldMessenger.of(context).showSnackBar(
-              SnackBar(
-                content: Text('Download failed for ${job.name}: $e'),
-                backgroundColor: Colors.red,
-              ),
+            AppNotification.error(
+              context,
+              'Download failed for ${job.name}: $e',
             );
           }
         }
@@ -930,17 +928,16 @@ class _SftpTabWidgetState extends State<SftpTabWidget> {
           await _openLocalFileInExternalEditor(localFilePath);
         } on _TransferCancelledException {
           if (mounted) {
-            ScaffoldMessenger.of(context).showSnackBar(
-              SnackBar(content: Text('Cancelled opening "${job.name}"')),
+            AppNotification.show(
+              context,
+              message: 'Cancelled opening "${job.name}"',
             );
           }
         } catch (e) {
           if (mounted) {
-            ScaffoldMessenger.of(context).showSnackBar(
-              SnackBar(
-                content: Text('Failed to open ${job.name}: $e'),
-                backgroundColor: Colors.red,
-              ),
+            AppNotification.error(
+              context,
+              'Failed to open ${job.name}: $e',
             );
           }
         }
@@ -1149,8 +1146,9 @@ class _SftpTabWidgetState extends State<SftpTabWidget> {
         }
       } catch (e) {
         if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(content: Text('Failed to copy into local folder: $e'), backgroundColor: Colors.red),
+          AppNotification.error(
+            context,
+            'Failed to copy into local folder: $e',
           );
         }
       }
@@ -1232,28 +1230,21 @@ class _SftpTabWidgetState extends State<SftpTabWidget> {
         await _sftpSession!.sftp.remove(remoteTarget);
       }
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text(
-              isDir
-                  ? 'Removed remote directory "${item.filename}"'
-                  : 'Deleted remote file "${item.filename}"',
-            ),
-          ),
+        AppNotification.show(
+          context,
+          message: isDir
+              ? 'Removed remote directory "${item.filename}"'
+              : 'Deleted remote file "${item.filename}"',
         );
       }
       await _loadRemoteDirectory(_currentRemotePath);
     } catch (e) {
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text(
-              isDir
-                  ? 'Failed to remove remote directory: $e'
-                  : 'Failed to delete remote file: $e',
-            ),
-            backgroundColor: Colors.red,
-          ),
+        AppNotification.error(
+          context,
+          isDir
+              ? 'Failed to remove remote directory: $e'
+              : 'Failed to delete remote file: $e',
         );
       }
     }
@@ -1295,15 +1286,17 @@ class _SftpTabWidgetState extends State<SftpTabWidget> {
       final newPath = p.posix.join(_currentRemotePath, newName);
       await _sftpSession!.sftp.rename(oldPath, newPath);
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Renamed "${item.filename}" to "$newName"')),
+        AppNotification.show(
+          context,
+          message: 'Renamed "${item.filename}" to "$newName"',
         );
       }
       await _loadRemoteDirectory(_currentRemotePath);
     } catch (e) {
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Failed to rename remote item: $e'), backgroundColor: Colors.red),
+        AppNotification.error(
+          context,
+          'Failed to rename remote item: $e',
         );
       }
     }
@@ -1314,14 +1307,11 @@ class _SftpTabWidgetState extends State<SftpTabWidget> {
     final candidates = _remoteItems.where((e) => e.attr.isDirectory == isDirectory).toList();
     if (candidates.isEmpty) {
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text(
-              isDirectory
-                  ? 'No directories found in the current remote folder.'
-                  : 'No files found in the current remote folder.',
-            ),
-          ),
+        AppNotification.show(
+          context,
+          message: isDirectory
+              ? 'No directories found in the current remote folder.'
+              : 'No files found in the current remote folder.',
         );
       }
       return;
@@ -1412,8 +1402,9 @@ class _SftpTabWidgetState extends State<SftpTabWidget> {
     );
 
     if (savedUri != null && mounted) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Downloaded ${job.name} successfully.')),
+      AppNotification.success(
+        context,
+        'Downloaded ${job.name} successfully.',
       );
       if (_currentLocalPath.isNotEmpty) {
         await _loadLocalDirectory(_currentLocalPath);
@@ -1531,19 +1522,16 @@ class _SftpTabWidgetState extends State<SftpTabWidget> {
       }
 
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text('Opened in external text editor (local copy: $localFilePath)'),
-          ),
+        AppNotification.show(
+          context,
+          message: 'Opened in external text editor (local copy: $localFilePath)',
         );
       }
     } catch (e) {
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text('Failed to open in external editor: $e'),
-            backgroundColor: Colors.red,
-          ),
+        AppNotification.error(
+          context,
+          'Failed to open in external editor: $e',
         );
       }
     }
