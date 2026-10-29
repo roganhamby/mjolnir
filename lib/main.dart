@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'dart:ui';
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -84,6 +85,9 @@ class TabItem {
   final ServerConfig? server;
   String themeName;
   double fontSize;
+  int timerSeconds;
+  bool isTimerRunning;
+  Timer? _activeTimer;
 
   TabItem({
     required this.id,
@@ -94,7 +98,46 @@ class TabItem {
     this.server,
     this.themeName = 'Default Dark',
     this.fontSize = 13.0,
+    this.timerSeconds = 0,
+    this.isTimerRunning = false,
   });
+
+  void startTimer(VoidCallback onTick) {
+    if (isTimerRunning) return;
+    isTimerRunning = true;
+    _activeTimer?.cancel();
+    _activeTimer = Timer.periodic(const Duration(seconds: 1), (t) {
+      timerSeconds++;
+      onTick();
+    });
+    onTick();
+  }
+
+  void stopTimer([VoidCallback? onStopped]) {
+    if (!isTimerRunning && _activeTimer == null) return;
+    isTimerRunning = false;
+    _activeTimer?.cancel();
+    _activeTimer = null;
+    onStopped?.call();
+  }
+
+  void resetTimer([VoidCallback? onReset]) {
+    stopTimer();
+    timerSeconds = 0;
+    onReset?.call();
+  }
+
+  String get formattedTimer {
+    final hours = timerSeconds ~/ 3600;
+    final minutes = (timerSeconds % 3600) ~/ 60;
+    final seconds = timerSeconds % 60;
+    final mStr = minutes.toString().padLeft(2, '0');
+    final sStr = seconds.toString().padLeft(2, '0');
+    if (hours > 0) {
+      return '$hours:$mStr:$sStr';
+    }
+    return '$mStr:$sStr';
+  }
 }
 
 class MainScreen extends StatefulWidget {
@@ -113,7 +156,7 @@ class MainScreen extends StatefulWidget {
   State<MainScreen> createState() => _MainScreenState();
 }
 
-class _MainScreenState extends State<MainScreen> {
+class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
   late final VaultManager _vaultManager;
   final SshService _sshService = SshService();
   final GlobalKey _pasteboardButtonKey = GlobalKey();
@@ -141,6 +184,7 @@ class _MainScreenState extends State<MainScreen> {
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     if (widget.vaultManager != null) {
       _vaultManager = widget.vaultManager!;
     } else {
@@ -158,9 +202,47 @@ class _MainScreenState extends State<MainScreen> {
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    _stopAllTabTimers();
     _dueDateTimer?.cancel();
     _masterPasswordController.dispose();
     super.dispose();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    super.didChangeAppLifecycleState(state);
+    if (state != AppLifecycleState.resumed) {
+      // Auto-stop timers when the window loses focus, is minimized, or goes to background
+      _stopAllTabTimers();
+    }
+  }
+
+  void _stopActiveTabTimer() {
+    if (_activeTabIndex >= 0 && _activeTabIndex < _openTabs.length) {
+      _openTabs[_activeTabIndex].stopTimer();
+    }
+  }
+
+  void _stopAllTabTimers() {
+    bool changed = false;
+    for (final tab in _openTabs) {
+      if (tab.isTimerRunning) {
+        tab.stopTimer();
+        changed = true;
+      }
+    }
+    if (changed && mounted) {
+      setState(() {});
+    }
+  }
+
+  void _setActiveTabIndex(int newIndex) {
+    if (_activeTabIndex == newIndex) return;
+    _stopActiveTabTimer();
+    setState(() {
+      _activeTabIndex = newIndex;
+    });
   }
 
   Future<void> _handleUnlock() async {
@@ -193,6 +275,7 @@ class _MainScreenState extends State<MainScreen> {
   }
 
   void _openTerminalTab(ServerConfig server) {
+    _stopActiveTabTimer();
     final tabId = 'term-${server.id}-${DateTime.now().millisecondsSinceEpoch}';
     final themeToUse = server.terminalTheme.isNotEmpty
         ? server.terminalTheme
@@ -216,6 +299,7 @@ class _MainScreenState extends State<MainScreen> {
   }
 
   void _openSftpTab(ServerConfig server) {
+    _stopActiveTabTimer();
     final tabId = 'sftp-${server.id}-${DateTime.now().millisecondsSinceEpoch}';
     setState(() {
       _openTabs.add(
@@ -236,13 +320,12 @@ class _MainScreenState extends State<MainScreen> {
   void _openTaskManagerTab() {
     final existingIndex = _openTabs.indexWhere((t) => t.type == 'tasks');
     if (existingIndex >= 0) {
-      setState(() {
-        _activeTabIndex = existingIndex;
-        _collapseSidebarIfNarrowScreen();
-      });
+      _setActiveTabIndex(existingIndex);
+      _collapseSidebarIfNarrowScreen();
       return;
     }
 
+    _stopActiveTabTimer();
     setState(() {
       _openTabs.add(
         TabItem(
@@ -261,13 +344,12 @@ class _MainScreenState extends State<MainScreen> {
   void _openStoredStringsTab() {
     final existingIndex = _openTabs.indexWhere((t) => t.type == 'strings');
     if (existingIndex >= 0) {
-      setState(() {
-        _activeTabIndex = existingIndex;
-        _collapseSidebarIfNarrowScreen();
-      });
+      _setActiveTabIndex(existingIndex);
+      _collapseSidebarIfNarrowScreen();
       return;
     }
 
+    _stopActiveTabTimer();
     setState(() {
       _openTabs.add(
         TabItem(
@@ -556,6 +638,9 @@ class _MainScreenState extends State<MainScreen> {
     if (!mounted) return;
     final removeIndex = _openTabs.indexWhere((t) => t.id == tabId);
     if (removeIndex >= 0) {
+      final tabToRemove = _openTabs[removeIndex];
+      tabToRemove.stopTimer();
+      _stopActiveTabTimer();
       setState(() {
         _openTabs.removeAt(removeIndex);
         if (_openTabs.isEmpty) {
@@ -1711,6 +1796,7 @@ class _MainScreenState extends State<MainScreen> {
               icon: const Icon(Icons.lock_outline, size: 20),
               tooltip: 'Lock Vault',
               onPressed: () {
+                _stopAllTabTimers();
                 setState(() {
                   _openTabs.clear();
                   _activeTabIndex = -1;
@@ -2158,9 +2244,7 @@ class _MainScreenState extends State<MainScreen> {
                                 onPointerDown: (e) {
                                   if (e.buttons == kPrimaryMouseButton) {
                                     if (_activeTabIndex != index) {
-                                      setState(() {
-                                        _activeTabIndex = index;
-                                      });
+                                      _setActiveTabIndex(index);
                                     }
                                   }
                                 },
@@ -2168,9 +2252,7 @@ class _MainScreenState extends State<MainScreen> {
                                   behavior: HitTestBehavior.opaque,
                                   onTap: () {
                                     if (_activeTabIndex != index) {
-                                      setState(() {
-                                        _activeTabIndex = index;
-                                      });
+                                      _setActiveTabIndex(index);
                                     }
                                   },
                                   onSecondaryTap: () => _renameAndRecolorTab(tab),
@@ -2279,6 +2361,7 @@ class _MainScreenState extends State<MainScreen> {
                               ),
                             ),
                           ),
+                          _buildTabTimerWidget(tab, index, isActive, scheme),
                           Padding(
                             padding: const EdgeInsets.only(right: 4),
                             child: InkWell(
@@ -2409,6 +2492,112 @@ class _MainScreenState extends State<MainScreen> {
           ),
         ),
       ],
+    );
+  }
+
+  Widget _buildTabTimerWidget(TabItem tab, int index, bool isActive, AppColorScheme scheme) {
+    final isRunning = tab.isTimerRunning;
+    final hasElapsed = tab.timerSeconds > 0;
+
+    final Color timerColor;
+    final Color timerBg;
+    final Color timerBorder;
+
+    if (isRunning) {
+      timerColor = Colors.greenAccent;
+      timerBg = Colors.greenAccent.withAlpha(35);
+      timerBorder = Colors.greenAccent.withAlpha(160);
+    } else if (hasElapsed) {
+      timerColor = isActive ? scheme.accentColor : scheme.primaryText;
+      timerBg = scheme.elevatedSurface.withAlpha(120);
+      timerBorder = scheme.borderColor;
+    } else {
+      timerColor = scheme.mutedText.withAlpha(180);
+      timerBg = Colors.transparent;
+      timerBorder = scheme.borderColor.withAlpha(60);
+    }
+
+    return Padding(
+      padding: const EdgeInsets.only(right: 4),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Tooltip(
+            message: isRunning
+                ? 'Stop timer (auto-stops when tab is clicked off or window loses focus)'
+                : (hasElapsed
+                    ? 'Resume timer (auto-stops when tab is clicked off or window loses focus)'
+                    : 'Start timer (auto-stops when tab is clicked off or window loses focus)'),
+            waitDuration: const Duration(milliseconds: 500),
+            child: InkWell(
+              borderRadius: BorderRadius.circular(4),
+              onTap: () {
+                if (isRunning) {
+                  tab.stopTimer(() {
+                    if (mounted) setState(() {});
+                  });
+                } else {
+                  if (_activeTabIndex != index) {
+                    _setActiveTabIndex(index);
+                  }
+                  tab.startTimer(() {
+                    if (mounted) setState(() {});
+                  });
+                  if (mounted) setState(() {});
+                }
+              },
+              child: Container(
+                height: 22,
+                padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 2),
+                decoration: BoxDecoration(
+                  color: timerBg,
+                  borderRadius: BorderRadius.circular(4),
+                  border: Border.all(color: timerBorder, width: 1),
+                ),
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Icon(
+                      isRunning ? Icons.pause : Icons.play_arrow,
+                      size: 11,
+                      color: timerColor,
+                    ),
+                    const SizedBox(width: 3),
+                    Text(
+                      tab.formattedTimer,
+                      style: TextStyle(
+                        fontSize: 11,
+                        color: timerColor,
+                        fontWeight: isRunning || hasElapsed ? FontWeight.w600 : FontWeight.normal,
+                        fontFeatures: const [FontFeature.tabularFigures()],
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ),
+          if (hasElapsed && !isRunning) ...[
+            const SizedBox(width: 2),
+            Tooltip(
+              message: 'Reset timer to 00:00',
+              waitDuration: const Duration(milliseconds: 500),
+              child: InkWell(
+                borderRadius: BorderRadius.circular(4),
+                onTap: () {
+                  tab.resetTimer(() {
+                    if (mounted) setState(() {});
+                  });
+                },
+                child: Padding(
+                  padding: const EdgeInsets.all(3.0),
+                  child: Icon(Icons.refresh, size: 12, color: scheme.mutedText),
+                ),
+              ),
+            ),
+          ],
+        ],
+      ),
     );
   }
 }
