@@ -9,7 +9,6 @@ class SyncVaultFile {
   String appId;
   DateTime updatedAt;
   String salt;
-  Map<String, dynamic>? encryptedDropboxConfig;
   Map<String, dynamic>? encryptedSftpSyncConfig;
   List<ServerConfig> servers;
   List<TaskItem> tasks;
@@ -20,7 +19,6 @@ class SyncVaultFile {
     this.appId = 'com.serversync.mjolnir',
     DateTime? updatedAt,
     required this.salt,
-    this.encryptedDropboxConfig,
     this.encryptedSftpSyncConfig,
     List<ServerConfig>? servers,
     List<TaskItem>? tasks,
@@ -50,8 +48,6 @@ class SyncVaultFile {
           'iterations': 3,
           'memory_kb': 65536,
         },
-        if (encryptedDropboxConfig != null)
-          'encrypted_dropbox_config': encryptedDropboxConfig,
         if (encryptedSftpSyncConfig != null)
           'encrypted_sftp_sync_config': encryptedSftpSyncConfig,
         'servers': servers.map((s) => s.toJson()).toList(),
@@ -78,8 +74,6 @@ class SyncVaultFile {
           ? DateTime.tryParse(json['updated_at'] as String)?.toUtc() ?? DateTime.now().toUtc()
           : DateTime.now().toUtc(),
       salt: cryptoParams['salt'] as String? ?? CryptoVaultService.generateRandomSalt(),
-      encryptedDropboxConfig:
-          json['encrypted_dropbox_config'] as Map<String, dynamic>?,
       encryptedSftpSyncConfig:
           json['encrypted_sftp_sync_config'] as Map<String, dynamic>?,
       servers: serverList,
@@ -145,12 +139,6 @@ class SyncVaultFile {
       }
     }
 
-    if (remoteVault.encryptedDropboxConfig != null &&
-        (encryptedDropboxConfig == null ||
-            remoteVault.updatedAt.isAfter(updatedAt))) {
-      encryptedDropboxConfig = remoteVault.encryptedDropboxConfig;
-    }
-
     if (remoteVault.encryptedSftpSyncConfig != null &&
         (encryptedSftpSyncConfig == null ||
             remoteVault.updatedAt.isAfter(updatedAt))) {
@@ -171,7 +159,6 @@ class SyncVaultFile {
         (candidate.servers.isNotEmpty ||
             candidate.tasks.isNotEmpty ||
             candidate.storedStrings.isNotEmpty ||
-            candidate.encryptedDropboxConfig != null ||
             candidate.encryptedSftpSyncConfig != null)) {
       return true;
     }

@@ -8,7 +8,7 @@ import 'package:mjolnir/models/stored_string_item.dart';
 import 'package:mjolnir/models/task_item.dart';
 import 'package:mjolnir/models/sync_vault_file.dart';
 import 'package:mjolnir/services/crypto_vault_service.dart';
-import 'package:mjolnir/services/dropbox_sync_service.dart';
+import 'package:mjolnir/services/sftp_sync_service.dart';
 import 'package:mjolnir/services/ssh_service.dart';
 import 'package:mjolnir/services/sync_storage_provider.dart';
 import 'package:mjolnir/services/vault_manager.dart';
@@ -40,38 +40,38 @@ class _InMemoryStorageProvider implements SyncStorageProvider {
   }
 }
 
-class _FakeDropboxSyncService extends DropboxSyncService {
+class _FakeSftpSyncService extends SftpSyncService {
   final ({SyncVaultFile vault, String rawJson, String filePath, DateTime modifiedAt})? remoteResult;
-  DropboxConfig fakeConfig;
+  SftpSyncConfig fakeConfig;
+  final List<String> uploads = [];
 
-  _FakeDropboxSyncService({
+  _FakeSftpSyncService({
     required this.remoteResult,
-    DropboxConfig? config,
-  }) : fakeConfig = config ?? DropboxConfig(accessToken: 'fake-token', folderPath: '');
+    SftpSyncConfig? config,
+  }) : fakeConfig = config ?? SftpSyncConfig();
 
   @override
-  DropboxConfig get config => fakeConfig;
+  SftpSyncConfig get config => fakeConfig;
 
   @override
   Future<void> loadConfig() async {}
 
   @override
-  Future<void> saveConfig(DropboxConfig newConfig) async {
+  Future<void> saveConfig(SftpSyncConfig newConfig) async {
     fakeConfig = newConfig;
   }
 
   @override
   Future<String> uploadVaultJson(
     String jsonString, {
-    String fileName = 'servers.json',
+    String? fileName,
   }) async {
-    final folder = normalizedFolderPath;
-    final clean = fileName.trim().replaceAll(RegExp(r'^/+'), '');
-    return folder.isEmpty ? '/$clean' : '$folder/$clean';
+    uploads.add(jsonString);
+    return fileName ?? fakeConfig.remotePath;
   }
 
   @override
-  Future<({SyncVaultFile vault, String rawJson, String filePath, DateTime modifiedAt})?> fetchNewestVaultFromDropbox() async {
+  Future<({SyncVaultFile vault, String rawJson, String filePath, DateTime modifiedAt})?> fetchNewestVaultFromSftp() async {
     return remoteResult;
   }
 }
@@ -265,7 +265,7 @@ void main() {
       );
       final managerA = VaultManager(
         storageProvider: storageA,
-        dropboxService: _FakeDropboxSyncService(remoteResult: null),
+        sftpSyncService: _FakeSftpSyncService(remoteResult: null),
       );
       await managerA.init();
       await managerA.unlock(masterPassword);
@@ -292,7 +292,7 @@ void main() {
       );
       final managerB = VaultManager(
         storageProvider: storageB,
-        dropboxService: _FakeDropboxSyncService(remoteResult: null),
+        sftpSyncService: _FakeSftpSyncService(remoteResult: null),
       );
       await managerB.init();
       await managerB.unlock(masterPassword);
@@ -307,7 +307,7 @@ void main() {
       expect(managerB.storedStrings.length, equals(1));
     });
 
-    test('VaultManager uses the newest vault between Local and Dropbox (/App/Mjolnir) on load', () async {
+    test('VaultManager uses the newest vault between Local and SFTP on load', () async {
       final olderLocalVault = SyncVaultFile(
         salt: salt,
         updatedAt: DateTime.utc(2026, 5, 1, 10, 0),
@@ -321,13 +321,13 @@ void main() {
         ],
       );
 
-      final newerDropboxVault = SyncVaultFile(
+      final newerSftpVault = SyncVaultFile(
         salt: salt,
         updatedAt: DateTime.utc(2026, 5, 2, 14, 30),
         servers: [
           ServerConfig(
             id: 'srv-new',
-            name: 'New Dropbox Server',
+            name: 'New SFTP Server',
             host: '10.0.0.2',
             username: 'ubuntu',
           ),
@@ -338,27 +338,30 @@ void main() {
         stored: olderLocalVault,
         existedOnDisk: true,
       );
-      final dropbox = _FakeDropboxSyncService(
+      final sftp = _FakeSftpSyncService(
         remoteResult: (
-          vault: newerDropboxVault,
-          rawJson: newerDropboxVault.toFormattedJson(),
-          filePath: '/servers.json',
-          modifiedAt: newerDropboxVault.updatedAt,
+          vault: newerSftpVault,
+          rawJson: newerSftpVault.toFormattedJson(),
+          filePath: '/home/ubuntu/.mjolnir/servers.json',
+          modifiedAt: newerSftpVault.updatedAt,
+        ),
+        config: SftpSyncConfig(
+          host: 'sync.example.com',
+          username: 'ubuntu',
+          password: 'sync-pw',
+          autoSyncOnLoadAndSave: true,
         ),
       );
 
-      expect(dropbox.normalizedFolderPath, equals(''));
-      expect(dropbox.displayFolderPath, equals('All files / Apps / Mjolnir'));
-
       final manager = VaultManager(
         storageProvider: storage,
-        dropboxService: dropbox,
+        sftpSyncService: sftp,
       );
       await manager.init();
 
       expect(manager.servers.length, equals(1));
-      expect(manager.servers.first.name, equals('New Dropbox Server'));
-      expect(manager.loadedSource, contains('Dropbox (/servers.json)'));
+      expect(manager.servers.first.name, equals('New SFTP Server'));
+      expect(manager.loadedSource, contains('SFTP (/home/ubuntu/.mjolnir/servers.json)'));
     });
 
     test('AppColorSchemes provides valid dark and light color schemes and ThemeData', () {
@@ -502,15 +505,15 @@ void main() {
       expect(remoteBuffer, equals(expectedBytes));
     });
 
-    test('Exports encrypted Dropbox API credentials in JSON and restores them on new station setup', () async {
-      final stationADropbox = _FakeDropboxSyncService(
+    test('Exports encrypted SFTP sync credentials in JSON and restores them on new station setup', () async {
+      final stationASftp = _FakeSftpSyncService(
         remoteResult: null,
-        config: DropboxConfig(
-          accessToken: 'sl.u.secret-dropbox-token-xyz',
-          appKey: 'dbx-app-key-123',
-          appSecret: 'dbx-app-secret-456',
-          refreshToken: 'dbx-refresh-token-789',
-          folderPath: '',
+        config: SftpSyncConfig(
+          host: 'sync.example.com',
+          port: 2222,
+          username: 'syncuser',
+          password: 'secret-sftp-password-xyz',
+          remotePath: '~/.mjolnir/servers.json',
           autoSyncOnLoadAndSave: true,
         ),
       );
@@ -520,7 +523,7 @@ void main() {
       );
       final managerA = VaultManager(
         storageProvider: stationAStorage,
-        dropboxService: stationADropbox,
+        sftpSyncService: stationASftp,
       );
       await managerA.init();
       final unlockedA = await managerA.unlock(masterPassword);
@@ -538,22 +541,19 @@ void main() {
 
       final exportedJson = await managerA.prepareAndExportVaultJson();
       final decodedExport = jsonDecode(exportedJson) as Map<String, dynamic>;
-      expect(decodedExport['encrypted_dropbox_config'], isNotNull);
-      // Plaintext token must NEVER appear in the exported JSON
-      expect(exportedJson.contains('sl.u.secret-dropbox-token-xyz'), isFalse);
-      expect(exportedJson.contains('dbx-refresh-token-789'), isFalse);
+      expect(decodedExport['encrypted_sftp_sync_config'], isNotNull);
+      expect(decodedExport.containsKey('encrypted_dropbox_config'), isFalse);
+      // Plaintext password must NEVER appear in the exported JSON
+      expect(exportedJson.contains('secret-sftp-password-xyz'), isFalse);
 
-      // Station B: brand new unconfigured station (locked, empty Dropbox config)
-      final stationBDropbox = _FakeDropboxSyncService(
-        remoteResult: null,
-        config: DropboxConfig(accessToken: ''),
-      );
-      expect(stationBDropbox.config.isConfigured, isFalse);
+      // Station B: brand new unconfigured station (locked, empty SFTP config)
+      final stationBSftp = _FakeSftpSyncService(remoteResult: null);
+      expect(stationBSftp.config.isConfigured, isFalse);
 
       final stationBStorage = _InMemoryStorageProvider(existedOnDisk: false);
       final managerB = VaultManager(
         storageProvider: stationBStorage,
-        dropboxService: stationBDropbox,
+        sftpSyncService: stationBSftp,
       );
       await managerB.init();
 
@@ -563,14 +563,14 @@ void main() {
         masterPassword,
       );
       expect(setupResult.serverCount, equals(1));
-      expect(setupResult.dropboxConfigured, isTrue);
+      expect(setupResult.sftpConfigured, isTrue);
       expect(managerB.isUnlocked, isTrue);
       expect(managerB.servers.first.decryptedCredentials?.password, equals('bastion-pw'));
-      expect(stationBDropbox.config.isConfigured, isTrue);
-      expect(stationBDropbox.config.accessToken, equals('sl.u.secret-dropbox-token-xyz'));
-      expect(stationBDropbox.config.appKey, equals('dbx-app-key-123'));
-      expect(stationBDropbox.config.appSecret, equals('dbx-app-secret-456'));
-      expect(stationBDropbox.config.refreshToken, equals('dbx-refresh-token-789'));
+      expect(stationBSftp.config.isConfigured, isTrue);
+      expect(stationBSftp.config.host, equals('sync.example.com'));
+      expect(stationBSftp.config.port, equals(2222));
+      expect(stationBSftp.config.username, equals('syncuser'));
+      expect(stationBSftp.config.password, equals('secret-sftp-password-xyz'));
     });
 
     testWidgets('StoredStringsTabWidget preserves \\n newlines in multi-line strings without merging lines', (tester) async {

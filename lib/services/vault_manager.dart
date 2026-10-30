@@ -6,14 +6,12 @@ import '../models/stored_string_item.dart';
 import '../models/task_item.dart';
 import '../models/sync_vault_file.dart';
 import 'crypto_vault_service.dart';
-import 'dropbox_sync_service.dart';
 import 'sftp_sync_service.dart';
 import 'sync_storage_provider.dart';
 
 class VaultManager with ChangeNotifier {
   final CryptoVaultService cryptoService = CryptoVaultService();
   final SyncStorageProvider storageProvider;
-  final DropboxSyncService dropboxService;
   final SftpSyncService sftpSyncService;
 
   SyncVaultFile? _vault;
@@ -24,10 +22,8 @@ class VaultManager with ChangeNotifier {
 
   VaultManager({
     required this.storageProvider,
-    DropboxSyncService? dropboxService,
     SftpSyncService? sftpSyncService,
-  })  : dropboxService = dropboxService ?? DropboxSyncService(),
-        sftpSyncService = sftpSyncService ?? SftpSyncService();
+  }) : sftpSyncService = sftpSyncService ?? SftpSyncService();
 
   bool get isUnlocked => _isUnlocked;
   SyncVaultFile? get vault => _vault;
@@ -110,35 +106,6 @@ class VaultManager with ChangeNotifier {
     }
   }
 
-  /// Encrypts the current Dropbox API credentials into the vault if unlocked and configured.
-  Future<void> _syncDropboxConfigToVault() async {
-    if (!_isUnlocked || _masterKey == null || _vault == null) return;
-    if (dropboxService.config.isConfigured) {
-      _vault!.encryptedDropboxConfig = await cryptoService.encryptPayload(
-        payload: dropboxService.config.toJson(),
-        masterKey: _masterKey!,
-      );
-    }
-  }
-
-  /// Saves Dropbox API configuration and encrypts it into the vault if unlocked.
-  Future<void> saveDropboxConfig(DropboxConfig newConfig) async {
-    await dropboxService.saveConfig(newConfig);
-    if (_isUnlocked && _masterKey != null && _vault != null) {
-      if (newConfig.isConfigured) {
-        _vault!.encryptedDropboxConfig = await cryptoService.encryptPayload(
-          payload: newConfig.toJson(),
-          masterKey: _masterKey!,
-        );
-      } else {
-        _vault!.encryptedDropboxConfig = null;
-      }
-      _vault!.updatedAt = DateTime.now().toUtc();
-      await storageProvider.saveVault(_vault!);
-      notifyListeners();
-    }
-  }
-
   /// Saves the vault locally and, if SFTP auto-sync is enabled, uploads to the remote server.
   Future<void> _persistVault() async {
     if (_vault == null) return;
@@ -158,7 +125,7 @@ class VaultManager with ChangeNotifier {
   }
 
   /// Unlocks the vault using the given master password.
-  /// Derives the key and decrypts in-memory server credentials and Dropbox API credentials.
+  /// Derives the key and decrypts in-memory server credentials and SFTP sync credentials.
   Future<bool> unlock(String masterPassword) async {
     if (_vault == null) await init();
     if (_vault == null) return false;
@@ -190,24 +157,6 @@ class VaultManager with ChangeNotifier {
           final vaultSftp = SftpSyncConfig.fromJson(decryptedSftpMap);
           if (!sftpSyncService.config.isConfigured && vaultSftp.isConfigured) {
             await sftpSyncService.saveConfig(vaultSftp);
-          }
-        } catch (e) {
-          _masterKey = null;
-          _errorMessage = 'Invalid master password or corrupted credential payload.';
-          notifyListeners();
-          return false;
-        }
-      }
-
-      if (_vault!.encryptedDropboxConfig != null) {
-        try {
-          final decryptedDropboxMap = await cryptoService.decryptPayload(
-            encryptedData: _vault!.encryptedDropboxConfig!,
-            masterKey: key,
-          );
-          final vaultDropbox = DropboxConfig.fromJson(decryptedDropboxMap);
-          if (!dropboxService.config.isConfigured && vaultDropbox.isConfigured) {
-            await dropboxService.saveConfig(vaultDropbox);
           }
         } catch (e) {
           _masterKey = null;
@@ -336,19 +285,6 @@ class VaultManager with ChangeNotifier {
       }
     }
 
-    if (importedVault.encryptedDropboxConfig != null) {
-      final decryptedDropboxMap = await cryptoService.decryptPayload(
-        encryptedData: importedVault.encryptedDropboxConfig!,
-        masterKey: importedKey,
-      );
-      final importedDropbox = DropboxConfig.fromJson(decryptedDropboxMap);
-      if (importedDropbox.isConfigured &&
-          (!dropboxService.config.isConfigured ||
-              importedVault.updatedAt.isAfter(_vault!.updatedAt))) {
-        await dropboxService.saveConfig(importedDropbox);
-      }
-    }
-
     _vault!.updatedAt = DateTime.now().toUtc();
     await _persistVault();
     notifyListeners();
@@ -357,7 +293,7 @@ class VaultManager with ChangeNotifier {
 
   /// Imports a vault JSON while locked (e.g. on a brand new station), verifies the master password,
   /// restores encrypted SFTP sync credentials if included, and unlocks the station immediately.
-  Future<({int serverCount, bool sftpConfigured, bool dropboxConfigured})> importAndUnlockVaultJson(
+  Future<({int serverCount, bool sftpConfigured})> importAndUnlockVaultJson(
     String jsonString,
     String masterPassword,
   ) async {
@@ -384,19 +320,6 @@ class VaultManager with ChangeNotifier {
       }
     }
 
-    bool dropboxRestored = false;
-    if (importedVault.encryptedDropboxConfig != null) {
-      final decryptedDropboxMap = await cryptoService.decryptPayload(
-        encryptedData: importedVault.encryptedDropboxConfig!,
-        masterKey: key,
-      );
-      final importedDropbox = DropboxConfig.fromJson(decryptedDropboxMap);
-      if (importedDropbox.isConfigured) {
-        await dropboxService.saveConfig(importedDropbox);
-        dropboxRestored = true;
-      }
-    }
-
     _vault = importedVault;
     _masterKey = key;
     _isUnlocked = true;
@@ -409,7 +332,6 @@ class VaultManager with ChangeNotifier {
     return (
       serverCount: _vault!.servers.length,
       sftpConfigured: sftpRestored || sftpSyncService.config.isConfigured,
-      dropboxConfigured: dropboxRestored || dropboxService.config.isConfigured,
     );
   }
 
@@ -495,14 +417,13 @@ class VaultManager with ChangeNotifier {
     return _vault!.toFormattedJson();
   }
 
-  /// Ensures encrypted SFTP and Dropbox credentials are up to date in the vault and returns formatted JSON.
+  /// Ensures encrypted SFTP credentials are up to date in the vault and returns formatted JSON.
   Future<String> prepareAndExportVaultJson() async {
     if (_vault == null) {
       throw StateError('Vault not loaded.');
     }
     if (_isUnlocked && _masterKey != null) {
       await _syncSftpSyncConfigToVault();
-      await _syncDropboxConfigToVault();
       await storageProvider.saveVault(_vault!);
     }
     return _vault!.toFormattedJson();
@@ -572,79 +493,6 @@ class VaultManager with ChangeNotifier {
       _vault = newest.vault;
       await storageProvider.saveVault(_vault!);
       _loadedSource = 'SFTP (${newest.filePath})';
-      notifyListeners();
-      return newest.filePath;
-    }
-    return null;
-  }
-
-  /// Exports the current vault JSON directly to Dropbox in `/App/Mjolnir`.
-  Future<String> exportVaultToDropbox({String? fileName}) async {
-    if (_vault == null) {
-      throw StateError('Vault not loaded.');
-    }
-    _vault!.updatedAt = DateTime.now().toUtc();
-    await _syncDropboxConfigToVault();
-    await storageProvider.saveVault(_vault!);
-    final jsonString = _vault!.toFormattedJson();
-    final targetName = (fileName != null && fileName.trim().isNotEmpty)
-        ? fileName.trim()
-        : 'servers.json';
-    return await dropboxService.uploadVaultJson(
-      jsonString,
-      fileName: targetName,
-    );
-  }
-
-  /// Imports the newest JSON vault found in Dropbox's `/App/Mjolnir` directory.
-  /// If unlocked, merges servers and tasks by `updatedAt` timestamps and persists.
-  Future<({int serverCount, String filePath})> importNewestFromDropbox(
-    String masterPassword,
-  ) async {
-    final newest = await dropboxService.fetchNewestVaultFromDropbox();
-    if (newest == null) {
-      throw Exception(
-        'No JSON vault files found in Dropbox directory ${dropboxService.displayFolderPath}.',
-      );
-    }
-
-    if (!_isUnlocked) {
-      // When locked, replace local vault if Dropbox is newer (or force adopt it) and unlock
-      _vault = newest.vault;
-      await storageProvider.saveVault(_vault!);
-      _loadedSource = 'Dropbox (${newest.filePath})';
-      final ok = await unlock(masterPassword);
-      if (!ok) {
-        throw Exception(_errorMessage ?? 'Invalid master password for Dropbox vault.');
-      }
-      return (serverCount: _vault!.servers.length, filePath: newest.filePath);
-    }
-
-    final count = await importVaultJson(newest.rawJson, masterPassword);
-    _loadedSource = 'Dropbox (${newest.filePath})';
-    return (serverCount: count, filePath: newest.filePath);
-  }
-
-  /// Checks Dropbox for a newer vault while on the lock screen and loads it if newer.
-  Future<String?> checkAndLoadNewestFromDropbox() async {
-    final newest = await dropboxService.fetchNewestVaultFromDropbox();
-    if (newest == null) return null;
-
-    final localHasData = _vault != null &&
-        (_vault!.servers.isNotEmpty ||
-            _vault!.tasks.isNotEmpty ||
-            _vault!.storedStrings.isNotEmpty ||
-            _vault!.encryptedDropboxConfig != null);
-    if (_vault == null ||
-        SyncVaultFile.isNewerVault(
-          newest.vault,
-          _vault!,
-          candidateModifiedAt: newest.modifiedAt,
-          baselineExistedOnDisk: localHasData,
-        )) {
-      _vault = newest.vault;
-      await storageProvider.saveVault(_vault!);
-      _loadedSource = 'Dropbox (${newest.filePath})';
       notifyListeners();
       return newest.filePath;
     }
