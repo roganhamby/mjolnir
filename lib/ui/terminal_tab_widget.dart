@@ -1343,11 +1343,6 @@ Total Characters Logged: $_screenLogBytesWritten
     _terminalFocusNode.dispose();
     super.dispose();
   }
-    _terminalController.dispose();
-    _scrollController.dispose();
-    _terminalFocusNode.dispose();
-    super.dispose();
-  }
 
   void _sendRawToShell(List<int> bytes) {
     final session = _sshSession?.session;

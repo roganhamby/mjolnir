@@ -270,7 +270,7 @@ class SftpSyncService {
         if (item.attr.isDirectory) continue;
         if (!item.filename.toLowerCase().endsWith('.json')) continue;
 
-        final mtimeSecs = item.attr.mtime ?? 0;
+        final mtimeSecs = item.attr.modifyTime ?? 0;
         final modifiedAt = mtimeSecs > 0
             ? DateTime.fromMillisecondsSinceEpoch(mtimeSecs * 1000, isUtc: true)
             : DateTime.fromMillisecondsSinceEpoch(0, isUtc: true);
@@ -327,7 +327,7 @@ class SftpSyncService {
       if (isJsonFile && !files.any((f) => f.fullPath == resolvedRaw)) {
         try {
           final stat = await session.sftp.stat(resolvedRaw);
-          final mtimeSecs = stat.mtime ?? 0;
+          final mtimeSecs = stat.modifyTime ?? 0;
           final modifiedAt = mtimeSecs > 0
               ? DateTime.fromMillisecondsSinceEpoch(mtimeSecs * 1000, isUtc: true)
               : DateTime.fromMillisecondsSinceEpoch(0, isUtc: true);
