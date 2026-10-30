@@ -17,6 +17,10 @@ class SshSession {
     required this.session,
   });
 
+  bool get isClosed => client.isClosed;
+  int? get exitCode => session.exitCode;
+  SSHSessionExitSignal? get exitSignal => session.exitSignal;
+
   void close() {
     try {
       session.close();
@@ -241,6 +245,7 @@ class SshService {
       username: server.username,
       algorithms: compatibleAlgorithms,
       identities: identities,
+      keepAliveInterval: const Duration(seconds: 25),
       onPasswordRequest: () {
         if (password != null) {
           return password;

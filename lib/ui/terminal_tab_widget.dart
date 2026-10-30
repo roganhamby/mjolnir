@@ -134,6 +134,13 @@ class _TerminalTabWidgetState extends State<TerminalTabWidget>
   bool _isLoading = true;
   String? _errorMessage;
   bool _isExited = false;
+  bool _isDisconnected = false;
+  String? _disconnectReason;
+  Timer? _reconnectTimer;
+  int _reconnectCountdown = 0;
+  int _reconnectAttempt = 0;
+  bool _autoReconnectCancelled = false;
+  static const int maxReconnectAttempts = 5;
   late double _fontSize;
   late String _currentThemeName;
   late TerminalTheme _currentTheme;
@@ -1091,10 +1098,14 @@ Total Characters Logged: $_screenLogBytesWritten
   // --- SSH Connection Handling ---
 
   Future<void> _connect() async {
+    _reconnectTimer?.cancel();
+    _reconnectTimer = null;
+
     setState(() {
       _isLoading = true;
       _errorMessage = null;
       _isExited = false;
+      _reconnectCountdown = 0;
     });
 
     final connectMsg = 'Connecting to ${widget.server.username}@${widget.server.host}:${widget.server.port}...\r\n';
@@ -1127,6 +1138,10 @@ Total Characters Logged: $_screenLogBytesWritten
       }
 
       _sshSession = session;
+      _isDisconnected = false;
+      _disconnectReason = null;
+      _reconnectAttempt = 0;
+      _autoReconnectCancelled = false;
 
       // Ensure remote PTY and local scroll margins match the current viewport
       // immediately (in case the window was resized/maximized while connecting).
@@ -1134,6 +1149,9 @@ Total Characters Logged: $_screenLogBytesWritten
         terminal.mainBuffer.resetVerticalMargins();
       }
       _syncRemotePtySize();
+
+      bool wasStdoutError = false;
+      String? stdoutErrorMsg;
 
       // Pipe SSH stdout to terminal & screen log
       session.session.stdout.listen(
@@ -1143,15 +1161,26 @@ Total Characters Logged: $_screenLogBytesWritten
           _logStreamData(text);
         },
         onError: (err) {
+          wasStdoutError = true;
+          stdoutErrorMsg = err.toString();
           final errStr = '\r\n[SSH stdout error: $err]\r\n';
           _writeToTerminal(errStr);
           _logStreamData(errStr);
         },
         onDone: () {
-          final doneStr = '\r\n[Session closed]\r\n';
-          _writeToTerminal(doneStr);
-          _logStreamData(doneStr);
-          _handleSessionDone();
+          final isCleanExit = session.session.exitCode != null && !wasStdoutError;
+          if (isCleanExit) {
+            final doneStr = '\r\n[Session closed]\r\n';
+            _writeToTerminal(doneStr);
+            _logStreamData(doneStr);
+            _handleSessionDone();
+          } else {
+            final reason = stdoutErrorMsg ?? 'Remote host or network connection terminated.';
+            final dropMsg = '\r\n[Connection lost: $reason]\r\n';
+            _writeToTerminal(dropMsg);
+            _logStreamData(dropMsg);
+            _handleUnexpectedDisconnect(reason);
+          }
         },
       );
 
@@ -1164,6 +1193,13 @@ Total Characters Logged: $_screenLogBytesWritten
 
       // Terminal user input to SSH stdin
       terminal.onOutput = (data) {
+        if (_isDisconnected && !_isLoading) {
+          // Pressing Enter or Space on a disconnected terminal attempts reconnect
+          if (data.contains('\r') || data.contains('\n') || data == ' ') {
+            _reconnect();
+            return;
+          }
+        }
         if (data == '\x1b[>0;0;0c') {
           // Report modern xterm patch level (279) for Secondary Device
           // Attributes (DA2) so vim enables bracketed paste (\x1b[?2004h)
@@ -1191,6 +1227,7 @@ Total Characters Logged: $_screenLogBytesWritten
 
       setState(() {
         _isLoading = false;
+        _isDisconnected = false;
       });
       WidgetsBinding.instance.addPostFrameCallback((_) {
         if (mounted) {
@@ -1205,16 +1242,89 @@ Total Characters Logged: $_screenLogBytesWritten
       setState(() {
         _isLoading = false;
         _errorMessage = e.toString();
+        _isDisconnected = true;
+        _disconnectReason = e.toString();
       });
       final failMsg = '\r\n[Connection Failed: $e]\r\n';
       terminal.write(failMsg);
       _logStreamData(failMsg);
+
+      if (!_autoReconnectCancelled && _reconnectAttempt < maxReconnectAttempts) {
+        _startAutoReconnectCountdown();
+      }
     }
+  }
+
+  void _handleUnexpectedDisconnect(String reason) {
+    if (_isExited) return;
+    _sshSession?.close();
+    _sshSession = null;
+    setState(() {
+      _isLoading = false;
+      _isDisconnected = true;
+      _disconnectReason = reason;
+    });
+
+    if (!_autoReconnectCancelled && _reconnectAttempt < maxReconnectAttempts) {
+      _startAutoReconnectCountdown();
+    }
+  }
+
+  void _startAutoReconnectCountdown() {
+    _reconnectTimer?.cancel();
+    // Exponential backoff: 3s, 5s, 8s, 12s, 15s
+    const backoffSeconds = [3, 5, 8, 12, 15];
+    final delay = (_reconnectAttempt < backoffSeconds.length)
+        ? backoffSeconds[_reconnectAttempt]
+        : 15;
+
+    setState(() {
+      _reconnectCountdown = delay;
+    });
+
+    _reconnectTimer = Timer.periodic(const Duration(seconds: 1), (timer) {
+      if (!mounted) {
+        timer.cancel();
+        return;
+      }
+      if (_reconnectCountdown <= 1) {
+        timer.cancel();
+        _reconnectTimer = null;
+        setState(() {
+          _reconnectCountdown = 0;
+          _reconnectAttempt++;
+        });
+        _reconnect();
+      } else {
+        setState(() {
+          _reconnectCountdown--;
+        });
+      }
+    });
+  }
+
+  Future<void> _reconnect() async {
+    _reconnectTimer?.cancel();
+    _reconnectTimer = null;
+    _sshSession?.close();
+    _sshSession = null;
+    await _connect();
+  }
+
+  void _cancelAutoReconnect() {
+    _reconnectTimer?.cancel();
+    _reconnectTimer = null;
+    setState(() {
+      _reconnectCountdown = 0;
+      _autoReconnectCancelled = true;
+    });
   }
 
   void _handleSessionDone() {
     if (_isExited) return;
     _isExited = true;
+    _reconnectTimer?.cancel();
+    _reconnectTimer = null;
     _stopScreenLogging();
     if (mounted && widget.onClose != null) {
       widget.onClose!();
@@ -1224,8 +1334,15 @@ Total Characters Logged: $_screenLogBytesWritten
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
+    _reconnectTimer?.cancel();
+    _reconnectTimer = null;
     _sshSession?.close();
     _stopScreenLogging();
+    _terminalController.dispose();
+    _scrollController.dispose();
+    _terminalFocusNode.dispose();
+    super.dispose();
+  }
     _terminalController.dispose();
     _scrollController.dispose();
     _terminalFocusNode.dispose();
@@ -1349,6 +1466,94 @@ Total Characters Logged: $_screenLogBytesWritten
     );
   }
 
+  Widget _buildReconnectBanner(AppColorScheme scheme) {
+    final String message;
+    if (_isLoading) {
+      message = 'Reconnecting to ${widget.server.name}...';
+    } else if (_reconnectCountdown > 0) {
+      message = 'Connection lost. Auto-reconnecting in ${_reconnectCountdown}s (Attempt $_reconnectAttempt/$maxReconnectAttempts)...';
+    } else if (_reconnectAttempt >= maxReconnectAttempts) {
+      message = 'Connection lost. Auto-reconnect limit reached.';
+    } else if (_autoReconnectCancelled) {
+      message = 'Connection lost. Auto-reconnect paused.';
+    } else {
+      message = 'Connection lost${_errorMessage != null ? ": $_errorMessage" : (_disconnectReason != null ? ": $_disconnectReason" : "")}';
+    }
+
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+      decoration: BoxDecoration(
+        color: Colors.amber.withValues(alpha: 0.15),
+        border: Border(
+          bottom: BorderSide(color: Colors.amberAccent.withValues(alpha: 0.4)),
+        ),
+      ),
+      child: Row(
+        children: [
+          const Icon(Icons.wifi_off, size: 16, color: Colors.amberAccent),
+          const SizedBox(width: 8),
+          Expanded(
+            child: Text(
+              message,
+              style: const TextStyle(
+                color: Colors.amberAccent,
+                fontSize: 12,
+                fontWeight: FontWeight.w500,
+              ),
+              overflow: TextOverflow.ellipsis,
+            ),
+          ),
+          const SizedBox(width: 8),
+          if (_reconnectCountdown > 0) ...[
+            TextButton(
+              style: TextButton.styleFrom(
+                padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+                minimumSize: Size.zero,
+                tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+              ),
+              onPressed: _reconnect,
+              child: const Text('Reconnect Now', style: TextStyle(fontSize: 12, fontWeight: FontWeight.bold)),
+            ),
+            const SizedBox(width: 6),
+            TextButton(
+              style: TextButton.styleFrom(
+                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                minimumSize: Size.zero,
+                tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+              ),
+              onPressed: _cancelAutoReconnect,
+              child: const Text('Cancel', style: TextStyle(fontSize: 12, color: Colors.grey)),
+            ),
+          ] else if (!_isLoading) ...[
+            ElevatedButton.icon(
+              icon: const Icon(Icons.refresh, size: 14),
+              label: const Text('Reconnect', style: TextStyle(fontSize: 12)),
+              style: ElevatedButton.styleFrom(
+                padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+                minimumSize: Size.zero,
+                tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+              ),
+              onPressed: _reconnect,
+            ),
+          ],
+          const SizedBox(width: 8),
+          TextButton(
+            style: TextButton.styleFrom(
+              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+              minimumSize: Size.zero,
+              tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+            ),
+            onPressed: () {
+              _cancelAutoReconnect();
+              _handleSessionDone();
+            },
+            child: const Text('Close Tab', style: TextStyle(fontSize: 12, color: Colors.redAccent)),
+          ),
+        ],
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final isMobile = Platform.isAndroid || Platform.isIOS;
@@ -1365,8 +1570,8 @@ Total Characters Logged: $_screenLogBytesWritten
               Icon(
                 Icons.terminal,
                 size: 16,
-                color: _errorMessage != null
-                    ? Colors.redAccent
+                color: (_errorMessage != null || _isDisconnected)
+                    ? Colors.amberAccent
                     : (_isLoading ? scheme.accentColor : Colors.greenAccent),
               ),
               const SizedBox(width: 8),
@@ -1584,13 +1789,13 @@ Total Characters Logged: $_screenLogBytesWritten
                         height: 14,
                         child: CircularProgressIndicator(strokeWidth: 2),
                       )
-                    else if (_errorMessage != null)
+                    else if (_errorMessage != null || _isDisconnected)
                       IconButton(
                         icon: Icon(Icons.refresh, size: 16, color: scheme.accentColor),
                         tooltip: 'Reconnect',
                         padding: EdgeInsets.zero,
                         constraints: const BoxConstraints(minWidth: 24, minHeight: 24),
-                        onPressed: _connect,
+                        onPressed: _reconnect,
                       ),
                   ],
                 ),
@@ -1598,6 +1803,10 @@ Total Characters Logged: $_screenLogBytesWritten
             ],
           ),
         ),
+
+        // Reconnect banner when disconnected
+        if (_isDisconnected || (_errorMessage != null && !_isLoading))
+          _buildReconnectBanner(scheme),
 
         // Terminal Window
         Expanded(
