@@ -764,24 +764,40 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
             ),
             ElevatedButton(
               onPressed: () async {
+                // Close the dialog FIRST, synchronously. Previously the dialog
+                // was popped only after awaiting saveServer() (which can block
+                // on an SFTP auto-sync upload). If the user dismissed the dialog
+                // in the meantime (barrier tap) or pressed Save twice, the
+                // delayed pop() removed the main app route -> black screen.
+                if (ModalRoute.of(ctx)?.isCurrent ?? false) {
+                  Navigator.of(ctx).pop();
+                } else {
+                  return; // already closing; ignore repeated taps
+                }
+
                 setState(() {
                   tab.title = titleController.text.trim().isEmpty ? tab.title : titleController.text.trim();
                   tab.color = selectedColor;
                   tab.themeName = selectedTheme;
                 });
                 // Persist theme or default remote path to server config
-                if (tab.type == 'ssh' && tab.server != null) {
-                  tab.server!.terminalTheme = selectedTheme;
-                  await _vaultManager.saveServer(tab.server!);
-                } else if (tab.type == 'sftp' && tab.server != null) {
-                  final entered = remotePathController.text.trim();
-                  final effectivePath = entered.isEmpty ? '~/' : entered;
-                  tab.server!.defaultRemotePath = effectivePath;
-                  tab.server!.customRemotePathSet =
-                      effectivePath != '~/' && effectivePath != '~';
-                  await _vaultManager.saveServer(tab.server!);
+                try {
+                  if (tab.type == 'ssh' && tab.server != null) {
+                    tab.server!.terminalTheme = selectedTheme;
+                    await _vaultManager.saveServer(tab.server!);
+                  } else if (tab.type == 'sftp' && tab.server != null) {
+                    final entered = remotePathController.text.trim();
+                    final effectivePath = entered.isEmpty ? '~/' : entered;
+                    tab.server!.defaultRemotePath = effectivePath;
+                    tab.server!.customRemotePathSet =
+                        effectivePath != '~/' && effectivePath != '~';
+                    await _vaultManager.saveServer(tab.server!);
+                  }
+                } catch (e) {
+                  if (mounted) {
+                    AppNotification.error(context, 'Failed to save tab settings: $e');
+                  }
                 }
-                if (context.mounted) Navigator.of(ctx).pop();
               },
               child: const Text('Save'),
             ),
@@ -1377,7 +1393,12 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
                           } catch (_) {}
                         }
                         if (mounted) setState(() {});
-                        if (ctx.mounted) Navigator.of(ctx).pop();
+                        // Only pop if this dialog is still the top route; it may
+                        // have been dismissed while awaiting the network above,
+                        // in which case pop() would remove the main app route.
+                        if (ctx.mounted && (ModalRoute.of(ctx)?.isCurrent ?? false)) {
+                          Navigator.of(ctx).pop();
+                        }
                       },
                 child: const Text('Save Settings'),
               ),
