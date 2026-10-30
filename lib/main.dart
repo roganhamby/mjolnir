@@ -10,7 +10,8 @@ import 'package:intl/intl.dart';
 import 'models/server_config.dart';
 import 'models/task_item.dart';
 import 'models/stored_string_item.dart';
-import 'services/dropbox_sync_service.dart';
+// import 'services/dropbox_sync_service.dart';
+import 'services/sftp_sync_service.dart';
 import 'services/sync_storage_provider.dart';
 import 'services/vault_manager.dart';
 import 'services/ssh_service.dart';
@@ -819,6 +820,576 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
     }
   }
 
+  Future<void> _exportToSftp() async {
+    final sftp = _vaultManager.sftpSyncService;
+    if (!sftp.config.isConfigured) {
+      _showSftpSyncDialog();
+      return;
+    }
+
+    try {
+      final dateStr = DateTime.now().toIso8601String().split('T').first;
+      final path = await _vaultManager.exportVaultToSftp(fileName: 'servers.json');
+      await _vaultManager.exportVaultToSftp(fileName: 'mjolnir-servers-$dateStr.json');
+      if (mounted) {
+        AppNotification.show(
+          context,
+          message: 'Exported JSON vault to SFTP server ($path on ${sftp.config.host}).',
+        );
+      }
+    } catch (e) {
+      if (mounted) {
+        AppNotification.error(
+          context,
+          'SFTP export failed: $e',
+        );
+      }
+    }
+  }
+
+  Future<void> _importFromSftp() async {
+    final sftp = _vaultManager.sftpSyncService;
+    if (!sftp.config.isConfigured) {
+      _showSftpSyncDialog();
+      return;
+    }
+
+    final importPassController = TextEditingController();
+    final confirm = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Import Newest JSON from SFTP'),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(
+              'Fetches the newest JSON file from "${sftp.displayRemotePath}" on ${sftp.config.host} and merges connections & tasks.',
+              style: const TextStyle(fontSize: 12, color: Colors.grey),
+            ),
+            const SizedBox(height: 12),
+            const Text('Enter the Master Password used to encrypt the SFTP vault:'),
+            const SizedBox(height: 12),
+            TextField(
+              controller: importPassController,
+              obscureText: true,
+              autofocus: true,
+              decoration: const InputDecoration(
+                labelText: 'Vault Master Password',
+                border: OutlineInputBorder(),
+              ),
+              onSubmitted: (_) => Navigator.of(ctx).pop(true),
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(false),
+            child: const Text('Cancel'),
+          ),
+          ElevatedButton.icon(
+            icon: const Icon(Icons.cloud_download_outlined, size: 16),
+            onPressed: () => Navigator.of(ctx).pop(true),
+            label: const Text('Import Newest & Merge'),
+          ),
+        ],
+      ),
+    );
+
+    if (confirm == true && importPassController.text.isNotEmpty && mounted) {
+      try {
+        final result = await _vaultManager.importNewestFromSftp(
+          importPassController.text,
+        );
+        if (mounted) {
+          setState(() {});
+          AppNotification.show(
+            context,
+            message:
+                'Imported newest vault from SFTP (${result.filePath}): ${result.serverCount} server(s) merged.',
+          );
+        }
+      } catch (e) {
+        if (mounted) {
+          AppNotification.error(
+            context,
+            'SFTP import failed: $e',
+          );
+        }
+      }
+    }
+  }
+
+  void _showSftpSyncDialog() {
+    final sftp = _vaultManager.sftpSyncService;
+    final hostController = TextEditingController(text: sftp.config.host);
+    final portController = TextEditingController(text: sftp.config.port.toString());
+    final usernameController = TextEditingController(text: sftp.config.username);
+    final passwordController = TextEditingController(text: sftp.config.password ?? '');
+    final privateKeyController = TextEditingController(text: sftp.config.privateKey ?? '');
+    final passphraseController = TextEditingController(text: sftp.config.passphrase ?? '');
+    final remotePathController = TextEditingController(text: sftp.config.remotePath);
+    AuthType authType = sftp.config.authType;
+    bool autoSync = sftp.config.autoSyncOnLoadAndSave;
+    bool hidePassword = true;
+    bool hidePassphrase = true;
+    bool isWorking = false;
+    String? statusMsg;
+    bool isError = false;
+
+    showDialog(
+      context: context,
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setDialogState) {
+          SftpSyncConfig buildConfigFromInputs() {
+            final parsedPort = int.tryParse(portController.text.trim()) ?? 22;
+            return SftpSyncConfig(
+              host: hostController.text.trim(),
+              port: parsedPort > 0 ? parsedPort : 22,
+              username: usernameController.text.trim(),
+              authType: authType,
+              password: passwordController.text.isNotEmpty ? passwordController.text : null,
+              privateKey: privateKeyController.text.trim().isNotEmpty ? privateKeyController.text.trim() : null,
+              passphrase: passphraseController.text.isNotEmpty ? passphraseController.text : null,
+              remotePath: remotePathController.text.trim().isNotEmpty ? remotePathController.text.trim() : '~/.mjolnir/servers.json',
+              autoSyncOnLoadAndSave: autoSync,
+            );
+          }
+
+          Future<void> saveSettings() async {
+            final newConfig = buildConfigFromInputs();
+            await _vaultManager.saveSftpSyncConfig(newConfig);
+          }
+
+          return AlertDialog(
+            title: const Row(
+              children: [
+                Icon(Icons.dns_outlined, color: Colors.cyanAccent),
+                SizedBox(width: 10),
+                Text('SFTP Server Sync (Dogfooding)'),
+              ],
+            ),
+            content: SizedBox(
+              width: 540,
+              child: SingleChildScrollView(
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    const Text(
+                      'Dogfooding: Sync your encrypted vaults directly to your own SSH/SFTP server across macOS, Windows, iOS, and Android without any third-party clouds or OAuth.\n'
+                      'Your credentials remain AES-256-GCM encrypted and can only be decrypted with your Master Password.',
+                      style: TextStyle(fontSize: 12, color: Colors.white70),
+                    ),
+                    const SizedBox(height: 14),
+                    if (_vaultManager.servers.isNotEmpty) ...[
+                      DropdownButtonFormField<ServerConfig>(
+                        decoration: const InputDecoration(
+                          labelText: 'Quick Fill from Saved Server',
+                          border: OutlineInputBorder(),
+                          isDense: true,
+                          prefixIcon: Icon(Icons.copy, size: 18),
+                        ),
+                        hint: const Text('Select a server to copy settings...'),
+                        items: _vaultManager.servers.map((s) {
+                          return DropdownMenuItem<ServerConfig>(
+                            value: s,
+                            child: Text(
+                              '${s.name} (${s.username}@${s.host}:${s.port})',
+                              overflow: TextOverflow.ellipsis,
+                            ),
+                          );
+                        }).toList(),
+                        onChanged: (selected) {
+                          if (selected != null) {
+                            setDialogState(() {
+                              hostController.text = selected.host;
+                              portController.text = selected.port.toString();
+                              usernameController.text = selected.username;
+                              authType = selected.authType;
+                              passwordController.text = selected.decryptedCredentials?.password ?? '';
+                              privateKeyController.text = selected.decryptedCredentials?.privateKey ?? '';
+                              passphraseController.text = selected.decryptedCredentials?.passphrase ?? '';
+                            });
+                          }
+                        },
+                      ),
+                      const SizedBox(height: 14),
+                    ],
+                    Row(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Expanded(
+                          flex: 3,
+                          child: TextField(
+                            controller: hostController,
+                            decoration: const InputDecoration(
+                              labelText: 'SFTP Host / IP',
+                              hintText: 'e.g. sftp.example.com or 192.168.1.50',
+                              border: OutlineInputBorder(),
+                              isDense: true,
+                              prefixIcon: Icon(Icons.computer, size: 18),
+                            ),
+                          ),
+                        ),
+                        const SizedBox(width: 10),
+                        Expanded(
+                          flex: 1,
+                          child: TextField(
+                            controller: portController,
+                            keyboardType: TextInputType.number,
+                            decoration: const InputDecoration(
+                              labelText: 'Port',
+                              hintText: '22',
+                              border: OutlineInputBorder(),
+                              isDense: true,
+                            ),
+                          ),
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 12),
+                    TextField(
+                      controller: usernameController,
+                      decoration: const InputDecoration(
+                        labelText: 'Username',
+                        hintText: 'e.g. root or admin',
+                        border: OutlineInputBorder(),
+                        isDense: true,
+                        prefixIcon: Icon(Icons.person_outline, size: 18),
+                      ),
+                    ),
+                    const SizedBox(height: 12),
+                    Row(
+                      children: [
+                        const Text('Authentication:', style: TextStyle(fontSize: 12, fontWeight: FontWeight.bold)),
+                        const SizedBox(width: 12),
+                        ChoiceChip(
+                          label: const Text('Password', style: TextStyle(fontSize: 12)),
+                          selected: authType == AuthType.password,
+                          onSelected: (val) {
+                            if (val) setDialogState(() => authType = AuthType.password);
+                          },
+                        ),
+                        const SizedBox(width: 8),
+                        ChoiceChip(
+                          label: const Text('Private Key', style: TextStyle(fontSize: 12)),
+                          selected: authType == AuthType.privateKey,
+                          onSelected: (val) {
+                            if (val) setDialogState(() => authType = AuthType.privateKey);
+                          },
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 12),
+                    if (authType == AuthType.password)
+                      TextField(
+                        controller: passwordController,
+                        obscureText: hidePassword,
+                        decoration: InputDecoration(
+                          labelText: 'SFTP Password',
+                          border: const OutlineInputBorder(),
+                          isDense: true,
+                          prefixIcon: const Icon(Icons.lock_outline, size: 18),
+                          suffixIcon: IconButton(
+                            icon: Icon(hidePassword ? Icons.visibility_off : Icons.visibility, size: 18),
+                            onPressed: () => setDialogState(() => hidePassword = !hidePassword),
+                          ),
+                        ),
+                      )
+                    else ...[
+                      Row(
+                        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                        children: [
+                          const Text('Private Key (OpenSSH / PEM format):', style: TextStyle(fontSize: 12, color: Colors.grey)),
+                          TextButton.icon(
+                            icon: const Icon(Icons.file_open, size: 16),
+                            label: const Text('Pick Key File', style: TextStyle(fontSize: 12)),
+                            onPressed: () async {
+                              try {
+                                final res = await FilePicker.pickFiles(
+                                  dialogTitle: 'Select Private Key File',
+                                  type: FileType.any,
+                                );
+                                if (res.isNotEmpty && res.first.path != null) {
+                                  final file = File(res.first.path!);
+                                  final text = await file.readAsString();
+                                  setDialogState(() {
+                                    privateKeyController.text = text;
+                                  });
+                                }
+                              } catch (e) {
+                                setDialogState(() {
+                                  statusMsg = 'Failed to read key file: $e';
+                                  isError = true;
+                                });
+                              }
+                            },
+                          ),
+                        ],
+                      ),
+                      const SizedBox(height: 4),
+                      TextField(
+                        controller: privateKeyController,
+                        maxLines: 4,
+                        decoration: const InputDecoration(
+                          hintText: '-----BEGIN OPENSSH PRIVATE KEY-----\n...',
+                          border: OutlineInputBorder(),
+                          isDense: true,
+                        ),
+                        style: const TextStyle(fontFamily: 'monospace', fontSize: 11),
+                      ),
+                      const SizedBox(height: 10),
+                      TextField(
+                        controller: passphraseController,
+                        obscureText: hidePassphrase,
+                        decoration: InputDecoration(
+                          labelText: 'Key Passphrase (Optional)',
+                          border: const OutlineInputBorder(),
+                          isDense: true,
+                          prefixIcon: const Icon(Icons.vpn_key_outlined, size: 18),
+                          suffixIcon: IconButton(
+                            icon: Icon(hidePassphrase ? Icons.visibility_off : Icons.visibility, size: 18),
+                            onPressed: () => setDialogState(() => hidePassphrase = !hidePassphrase),
+                          ),
+                        ),
+                      ),
+                    ],
+                    const SizedBox(height: 14),
+                    TextField(
+                      controller: remotePathController,
+                      decoration: const InputDecoration(
+                        labelText: 'Remote File Path',
+                        hintText: '~/.mjolnir/servers.json',
+                        helperText: 'Target file on remote server (e.g. ~/.mjolnir/servers.json). Parent folder is created automatically.',
+                        helperMaxLines: 2,
+                        border: OutlineInputBorder(),
+                        isDense: true,
+                        prefixIcon: Icon(Icons.folder_outlined, size: 18),
+                      ),
+                    ),
+                    const SizedBox(height: 14),
+                    SwitchListTile(
+                      contentPadding: EdgeInsets.zero,
+                      title: const Text('Auto-sync vault on launch & save', style: TextStyle(fontSize: 13)),
+                      subtitle: const Text(
+                        'Compares timestamps on startup and loads the newest JSON from SFTP, and uploads when changes are saved locally.',
+                        style: TextStyle(fontSize: 11, color: Colors.grey),
+                      ),
+                      value: autoSync,
+                      onChanged: (val) {
+                        setDialogState(() {
+                          autoSync = val;
+                        });
+                      },
+                    ),
+                    const Divider(height: 24),
+                    Wrap(
+                      spacing: 8,
+                      runSpacing: 8,
+                      children: [
+                        OutlinedButton.icon(
+                          icon: const Icon(Icons.cable, size: 16),
+                          label: const Text('Test Connection', style: TextStyle(fontSize: 12)),
+                          onPressed: isWorking
+                              ? null
+                              : () async {
+                                  setDialogState(() {
+                                    isWorking = true;
+                                    statusMsg = 'Testing connection to ${hostController.text.trim()}...';
+                                    isError = false;
+                                  });
+                                  try {
+                                    final tempConfig = buildConfigFromInputs();
+                                    final res = await sftp.testConnection(tempConfig);
+                                    setDialogState(() {
+                                      isWorking = false;
+                                      statusMsg = res.message;
+                                      isError = !res.success;
+                                    });
+                                  } catch (e) {
+                                    setDialogState(() {
+                                      isWorking = false;
+                                      statusMsg = 'Connection error: $e';
+                                      isError = true;
+                                    });
+                                  }
+                                },
+                        ),
+                        OutlinedButton.icon(
+                          icon: const Icon(Icons.cloud_upload_outlined, size: 16),
+                          label: const Text('Export Now', style: TextStyle(fontSize: 12)),
+                          onPressed: isWorking || !_vaultManager.isUnlocked
+                              ? null
+                              : () async {
+                                  setDialogState(() {
+                                    isWorking = true;
+                                    statusMsg = 'Exporting vault to SFTP...';
+                                    isError = false;
+                                  });
+                                  try {
+                                    await saveSettings();
+                                    final path = await _vaultManager.exportVaultToSftp(fileName: 'servers.json');
+                                    final dateStr = DateTime.now().toIso8601String().split('T').first;
+                                    await _vaultManager.exportVaultToSftp(fileName: 'mjolnir-servers-$dateStr.json');
+                                    setDialogState(() {
+                                      isWorking = false;
+                                      statusMsg = 'Successfully exported vault to $path on ${hostController.text.trim()}!';
+                                      isError = false;
+                                    });
+                                  } catch (e) {
+                                    setDialogState(() {
+                                      isWorking = false;
+                                      statusMsg = 'Export failed: $e';
+                                      isError = true;
+                                    });
+                                  }
+                                },
+                        ),
+                        OutlinedButton.icon(
+                          icon: const Icon(Icons.cloud_download_outlined, size: 16),
+                          label: const Text('Import Now', style: TextStyle(fontSize: 12)),
+                          onPressed: isWorking
+                              ? null
+                              : () async {
+                                  if (!_vaultManager.isUnlocked) {
+                                    setDialogState(() {
+                                      statusMsg = 'Vault is locked. Unlock first or use Lock Screen setup.';
+                                      isError = true;
+                                    });
+                                    return;
+                                  }
+                                  final masterPassCtrl = TextEditingController();
+                                  final confirm = await showDialog<bool>(
+                                    context: ctx,
+                                    builder: (innerCtx) => AlertDialog(
+                                      title: const Text('Confirm Import from SFTP'),
+                                      content: Column(
+                                        mainAxisSize: MainAxisSize.min,
+                                        children: [
+                                          const Text(
+                                            'This will download the newest JSON file from the SFTP server and merge it into your active vault.',
+                                          ),
+                                          const SizedBox(height: 12),
+                                          TextField(
+                                            controller: masterPassCtrl,
+                                            obscureText: true,
+                                            decoration: const InputDecoration(
+                                              labelText: 'Master Password for SFTP Vault',
+                                              border: OutlineInputBorder(),
+                                            ),
+                                          ),
+                                        ],
+                                      ),
+                                      actions: [
+                                        TextButton(
+                                          onPressed: () => Navigator.of(innerCtx).pop(false),
+                                          child: const Text('Cancel'),
+                                        ),
+                                        ElevatedButton(
+                                          onPressed: () => Navigator.of(innerCtx).pop(true),
+                                          child: const Text('Import'),
+                                        ),
+                                      ],
+                                    ),
+                                  );
+
+                                  if (confirm != true || masterPassCtrl.text.isEmpty) return;
+
+                                  setDialogState(() {
+                                    isWorking = true;
+                                    statusMsg = 'Importing newest vault from SFTP...';
+                                    isError = false;
+                                  });
+                                  try {
+                                    await saveSettings();
+                                    final res = await _vaultManager.importNewestFromSftp(masterPassCtrl.text);
+                                    setDialogState(() {
+                                      isWorking = false;
+                                      statusMsg = 'Imported ${res.serverCount} server(s) from ${res.filePath}!';
+                                      isError = false;
+                                    });
+                                    if (mounted) setState(() {});
+                                  } catch (e) {
+                                    setDialogState(() {
+                                      isWorking = false;
+                                      statusMsg = 'Import failed: $e';
+                                      isError = true;
+                                    });
+                                  }
+                                },
+                        ),
+                      ],
+                    ),
+                    if (statusMsg != null) ...[
+                      const SizedBox(height: 14),
+                      Container(
+                        padding: const EdgeInsets.all(10),
+                        decoration: BoxDecoration(
+                          color: isError
+                              ? Colors.redAccent.withOpacity(0.15)
+                              : Colors.greenAccent.withOpacity(0.15),
+                          borderRadius: BorderRadius.circular(6),
+                          border: Border.all(
+                            color: isError ? Colors.redAccent : Colors.greenAccent,
+                            width: 1,
+                          ),
+                        ),
+                        child: Row(
+                          children: [
+                            Icon(
+                              isError ? Icons.error_outline : Icons.check_circle_outline,
+                              color: isError ? Colors.redAccent : Colors.greenAccent,
+                              size: 18,
+                            ),
+                            const SizedBox(width: 8),
+                            Expanded(
+                              child: Text(
+                                statusMsg!,
+                                style: TextStyle(
+                                  color: isError ? Colors.redAccent : Colors.greenAccent,
+                                  fontSize: 12,
+                                ),
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ],
+                  ],
+                ),
+              ),
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.of(ctx).pop(),
+                child: const Text('Cancel'),
+              ),
+              ElevatedButton(
+                onPressed: isWorking
+                    ? null
+                    : () async {
+                        await saveSettings();
+                        if (autoSync && sftp.config.isConfigured) {
+                          try {
+                            if (_vaultManager.isUnlocked) {
+                              await _vaultManager.exportVaultToSftp(fileName: 'servers.json');
+                            }
+                          } catch (_) {}
+                        }
+                        if (mounted) setState(() {});
+                        if (ctx.mounted) Navigator.of(ctx).pop();
+                      },
+                child: const Text('Save Settings'),
+              ),
+            ],
+          );
+        },
+      ),
+    );
+  }
+
+  /*
   Future<void> _exportToDropbox() async {
     final dropbox = _vaultManager.dropboxService;
     if (!dropbox.config.isConfigured) {
@@ -846,7 +1417,9 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
       }
     }
   }
+  */
 
+  /*
   Future<void> _importFromDropbox() async {
     final dropbox = _vaultManager.dropboxService;
     if (!dropbox.config.isConfigured) {
@@ -918,7 +1491,9 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
       }
     }
   }
+  */
 
+  /*
   Future<void> _openExternalUrl(String url) async {
     try {
       if (Platform.isMacOS) {
@@ -1421,6 +1996,7 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
       ),
     );
   }
+  */
 
   Future<void> _importVault() async {
     try {
@@ -1496,21 +2072,21 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
             setState(() {});
             AppNotification.show(
               context,
-              message: res.dropboxConfigured
-                  ? 'Station ready: imported ${res.serverCount} server(s) and restored Dropbox API credentials.'
+              message: res.sftpConfigured
+                  ? 'Station ready: imported ${res.serverCount} server(s) and restored SFTP Sync credentials.'
                   : 'Station ready: imported ${res.serverCount} server(s).',
             );
           }
         } else {
-          final hadDropboxBefore = _vaultManager.dropboxService.config.isConfigured;
+          final hadSftpBefore = _vaultManager.sftpSyncService.config.isConfigured;
           final count = await _vaultManager.importVaultJson(content, importPassController.text);
-          final hasDropboxNow = _vaultManager.dropboxService.config.isConfigured;
+          final hasSftpNow = _vaultManager.sftpSyncService.config.isConfigured;
           if (mounted) {
             setState(() {});
             AppNotification.show(
               context,
-              message: (!hadDropboxBefore && hasDropboxNow)
-                  ? 'Imported and merged $count server(s) and restored Dropbox API credentials.'
+              message: (!hadSftpBefore && hasSftpNow)
+                  ? 'Imported and merged $count server(s) and restored SFTP Sync credentials.'
                   : 'Imported and merged $count server(s).',
             );
           }
@@ -1725,7 +2301,7 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
               tooltip: 'Import JSON Connections',
               onSelected: (val) {
                 if (val == 'local') _importVault();
-                if (val == 'dropbox') _importFromDropbox();
+                if (val == 'sftp') _importFromSftp();
               },
               itemBuilder: (ctx) => [
                 const PopupMenuItem(
@@ -1738,12 +2314,16 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
                   ),
                 ),
                 PopupMenuItem(
-                  value: 'dropbox',
+                  value: 'sftp',
                   child: ListTile(
                     dense: true,
                     contentPadding: EdgeInsets.zero,
-                    leading: Icon(Icons.cloud_download_outlined, size: 18, color: scheme.accentColor),
-                    title: const Text('Import Newest from Dropbox (All files / Apps / Mjolnir)'),
+                    leading: Icon(Icons.dns_outlined, size: 18, color: scheme.accentColor),
+                    title: Text(
+                      _vaultManager.sftpSyncService.config.isConfigured
+                          ? 'Import Newest from SFTP (${_vaultManager.sftpSyncService.config.host})'
+                          : 'Import from SFTP Server...',
+                    ),
                   ),
                 ),
               ],
@@ -1753,7 +2333,7 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
               tooltip: 'Export JSON Connections',
               onSelected: (val) {
                 if (val == 'local') _exportVault();
-                if (val == 'dropbox') _exportToDropbox();
+                if (val == 'sftp') _exportToSftp();
               },
               itemBuilder: (ctx) => [
                 const PopupMenuItem(
@@ -1766,12 +2346,16 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
                   ),
                 ),
                 PopupMenuItem(
-                  value: 'dropbox',
+                  value: 'sftp',
                   child: ListTile(
                     dense: true,
                     contentPadding: EdgeInsets.zero,
                     leading: Icon(Icons.cloud_upload_outlined, size: 18, color: scheme.accentColor),
-                    title: const Text('Export to Dropbox (All files / Apps / Mjolnir)'),
+                    title: Text(
+                      _vaultManager.sftpSyncService.config.isConfigured
+                          ? 'Export to SFTP (${_vaultManager.sftpSyncService.config.host})'
+                          : 'Export to SFTP Server...',
+                    ),
                   ),
                 ),
               ],
@@ -1780,12 +2364,14 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
               icon: Icon(
                 Icons.cloud_sync_outlined,
                 size: 20,
-                color: _vaultManager.dropboxService.config.isConfigured
+                color: _vaultManager.sftpSyncService.config.isConfigured
                     ? Colors.greenAccent
                     : null,
               ),
-              tooltip: 'Dropbox API Settings & Sync (All files / Apps / Mjolnir)',
-              onPressed: _showDropboxDialog,
+              tooltip: _vaultManager.sftpSyncService.config.isConfigured
+                  ? 'SFTP Sync Settings (${_vaultManager.sftpSyncService.config.host})'
+                  : 'Configure SFTP Sync (Dogfooding)',
+              onPressed: _showSftpSyncDialog,
             ),
             IconButton(
               icon: const Icon(Icons.add, size: 20),
@@ -1918,19 +2504,19 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
                 icon: Icon(
                   Icons.cloud_sync_outlined,
                   size: 16,
-                  color: _vaultManager.dropboxService.config.isConfigured
+                  color: _vaultManager.sftpSyncService.config.isConfigured
                       ? Colors.greenAccent
                       : scheme.accentColor,
                 ),
                 label: Text(
-                  _vaultManager.dropboxService.config.isConfigured
-                      ? 'Dropbox API Connected (${_vaultManager.dropboxService.displayFolderPath})'
-                      : 'Configure Dropbox API (All files / Apps / Mjolnir)',
+                  _vaultManager.sftpSyncService.config.isConfigured
+                      ? 'SFTP Sync Connected (${_vaultManager.sftpSyncService.config.host})'
+                      : 'Configure SFTP Sync (Dogfooding)',
                   style: const TextStyle(fontSize: 12),
                 ),
-                onPressed: _showDropboxDialog,
+                onPressed: _showSftpSyncDialog,
               ),
-              if (_vaultManager.loadedSource.startsWith('Dropbox'))
+              if (_vaultManager.loadedSource.startsWith('SFTP'))
                 Padding(
                   padding: const EdgeInsets.only(top: 4),
                   child: Text(

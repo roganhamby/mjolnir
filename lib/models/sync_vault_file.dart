@@ -10,6 +10,7 @@ class SyncVaultFile {
   DateTime updatedAt;
   String salt;
   Map<String, dynamic>? encryptedDropboxConfig;
+  Map<String, dynamic>? encryptedSftpSyncConfig;
   List<ServerConfig> servers;
   List<TaskItem> tasks;
   List<StoredStringItem> storedStrings;
@@ -20,6 +21,7 @@ class SyncVaultFile {
     DateTime? updatedAt,
     required this.salt,
     this.encryptedDropboxConfig,
+    this.encryptedSftpSyncConfig,
     List<ServerConfig>? servers,
     List<TaskItem>? tasks,
     List<StoredStringItem>? storedStrings,
@@ -50,6 +52,8 @@ class SyncVaultFile {
         },
         if (encryptedDropboxConfig != null)
           'encrypted_dropbox_config': encryptedDropboxConfig,
+        if (encryptedSftpSyncConfig != null)
+          'encrypted_sftp_sync_config': encryptedSftpSyncConfig,
         'servers': servers.map((s) => s.toJson()).toList(),
         'tasks': tasks.map((t) => t.toJson()).toList(),
         'stored_strings': storedStrings.map((s) => s.toJson()).toList(),
@@ -76,6 +80,8 @@ class SyncVaultFile {
       salt: cryptoParams['salt'] as String? ?? CryptoVaultService.generateRandomSalt(),
       encryptedDropboxConfig:
           json['encrypted_dropbox_config'] as Map<String, dynamic>?,
+      encryptedSftpSyncConfig:
+          json['encrypted_sftp_sync_config'] as Map<String, dynamic>?,
       servers: serverList,
       tasks: taskList,
       storedStrings: stringList,
@@ -145,6 +151,12 @@ class SyncVaultFile {
       encryptedDropboxConfig = remoteVault.encryptedDropboxConfig;
     }
 
+    if (remoteVault.encryptedSftpSyncConfig != null &&
+        (encryptedSftpSyncConfig == null ||
+            remoteVault.updatedAt.isAfter(updatedAt))) {
+      encryptedSftpSyncConfig = remoteVault.encryptedSftpSyncConfig;
+    }
+
     updatedAt = DateTime.now().toUtc();
   }
 
@@ -159,7 +171,8 @@ class SyncVaultFile {
         (candidate.servers.isNotEmpty ||
             candidate.tasks.isNotEmpty ||
             candidate.storedStrings.isNotEmpty ||
-            candidate.encryptedDropboxConfig != null)) {
+            candidate.encryptedDropboxConfig != null ||
+            candidate.encryptedSftpSyncConfig != null)) {
       return true;
     }
     final effectiveCandidateTime = candidateModifiedAt != null &&
