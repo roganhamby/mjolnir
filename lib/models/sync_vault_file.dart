@@ -1,4 +1,5 @@
 import 'dart:convert';
+import 'package:cryptography/cryptography.dart';
 import 'server_config.dart';
 import 'stored_string_item.dart';
 import 'task_item.dart';
@@ -10,6 +11,7 @@ class SyncVaultFile {
   DateTime updatedAt;
   String salt;
   Map<String, dynamic>? encryptedSftpSyncConfig;
+  Map<String, dynamic>? vaultPayload;
   List<ServerConfig> servers;
   List<TaskItem> tasks;
   List<StoredStringItem> storedStrings;
@@ -20,6 +22,7 @@ class SyncVaultFile {
     DateTime? updatedAt,
     required this.salt,
     this.encryptedSftpSyncConfig,
+    this.vaultPayload,
     List<ServerConfig>? servers,
     List<TaskItem>? tasks,
     List<StoredStringItem>? storedStrings,
@@ -28,9 +31,12 @@ class SyncVaultFile {
         tasks = tasks ?? [],
         storedStrings = storedStrings ?? [];
 
+  bool get isEncryptedEnvelope => vaultPayload != null;
+
   /// Factory for a brand new empty vault file
   factory SyncVaultFile.createEmpty() {
     return SyncVaultFile(
+      version: 2,
       salt: CryptoVaultService.generateRandomSalt(),
       servers: [],
       tasks: [],
@@ -50,13 +56,19 @@ class SyncVaultFile {
         },
         if (encryptedSftpSyncConfig != null)
           'encrypted_sftp_sync_config': encryptedSftpSyncConfig,
-        'servers': servers.map((s) => s.toJson()).toList(),
-        'tasks': tasks.map((t) => t.toJson()).toList(),
-        'stored_strings': storedStrings.map((s) => s.toJson()).toList(),
+        if (vaultPayload != null)
+          'vault_payload': vaultPayload
+        else ...{
+          'servers': servers.map((s) => s.toJson()).toList(),
+          'tasks': tasks.map((t) => t.toJson()).toList(),
+          'stored_strings': storedStrings.map((s) => s.toJson()).toList(),
+        },
       };
 
   factory SyncVaultFile.fromJson(Map<String, dynamic> json) {
     final cryptoParams = json['crypto_params'] as Map<String, dynamic>? ?? {};
+    final vPayload = json['vault_payload'] as Map<String, dynamic>?;
+
     final serverList = (json['servers'] as List<dynamic>? ?? [])
         .map((e) => ServerConfig.fromJson(e as Map<String, dynamic>))
         .toList();
@@ -68,7 +80,7 @@ class SyncVaultFile {
         .toList();
 
     return SyncVaultFile(
-      version: json['version'] as int? ?? 1,
+      version: json['version'] as int? ?? (vPayload != null ? 2 : 1),
       appId: json['app_id'] as String? ?? 'com.serversync.mjolnir',
       updatedAt: json['updated_at'] != null
           ? DateTime.tryParse(json['updated_at'] as String)?.toUtc() ?? DateTime.now().toUtc()
@@ -76,10 +88,50 @@ class SyncVaultFile {
       salt: cryptoParams['salt'] as String? ?? CryptoVaultService.generateRandomSalt(),
       encryptedSftpSyncConfig:
           json['encrypted_sftp_sync_config'] as Map<String, dynamic>?,
+      vaultPayload: vPayload,
       servers: serverList,
       tasks: taskList,
       storedStrings: stringList,
     );
+  }
+
+  /// Decrypts the inner zero-knowledge vault payload using the derived master key.
+  Future<void> decryptPayload(CryptoVaultService cryptoService, SecretKey masterKey) async {
+    if (vaultPayload == null) return;
+    final decryptedMap = await cryptoService.decryptPayload(
+      encryptedData: vaultPayload!,
+      masterKey: masterKey,
+    );
+
+    if (decryptedMap['servers'] is List) {
+      servers = (decryptedMap['servers'] as List)
+          .map((e) => ServerConfig.fromJson(e as Map<String, dynamic>))
+          .toList();
+    }
+    if (decryptedMap['tasks'] is List) {
+      tasks = (decryptedMap['tasks'] as List)
+          .map((e) => TaskItem.fromJson(e as Map<String, dynamic>))
+          .toList();
+    }
+    if (decryptedMap['stored_strings'] is List) {
+      storedStrings = (decryptedMap['stored_strings'] as List)
+          .map((e) => StoredStringItem.fromJson(e as Map<String, dynamic>))
+          .toList();
+    }
+  }
+
+  /// Encrypts in-memory servers, tasks, and stored_strings into [vaultPayload].
+  Future<void> encryptPayload(CryptoVaultService cryptoService, SecretKey masterKey) async {
+    final innerData = {
+      'servers': servers.map((s) => s.toJson()).toList(),
+      'tasks': tasks.map((t) => t.toJson()).toList(),
+      'stored_strings': storedStrings.map((s) => s.toJson()).toList(),
+    };
+    vaultPayload = await cryptoService.encryptPayload(
+      payload: innerData,
+      masterKey: masterKey,
+    );
+    version = 2;
   }
 
   String toFormattedJson() {
@@ -159,7 +211,8 @@ class SyncVaultFile {
         (candidate.servers.isNotEmpty ||
             candidate.tasks.isNotEmpty ||
             candidate.storedStrings.isNotEmpty ||
-            candidate.encryptedSftpSyncConfig != null)) {
+            candidate.encryptedSftpSyncConfig != null ||
+            candidate.vaultPayload != null)) {
       return true;
     }
     final effectiveCandidateTime = candidateModifiedAt != null &&

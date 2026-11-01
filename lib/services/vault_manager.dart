@@ -51,7 +51,8 @@ class VaultManager with ChangeNotifier {
                 (activeVault.servers.isNotEmpty ||
                     activeVault.tasks.isNotEmpty ||
                     activeVault.storedStrings.isNotEmpty ||
-                    activeVault.encryptedSftpSyncConfig != null);
+                    activeVault.encryptedSftpSyncConfig != null ||
+                    activeVault.vaultPayload != null);
             if (SyncVaultFile.isNewerVault(
               remoteNewest.vault,
               activeVault,
@@ -110,6 +111,9 @@ class VaultManager with ChangeNotifier {
   Future<void> _persistVault() async {
     if (_vault == null) return;
     await _syncSftpSyncConfigToVault();
+    if (_masterKey != null) {
+      await _vault!.encryptPayload(cryptoService, _masterKey!);
+    }
     await storageProvider.saveVault(_vault!);
     if (sftpSyncService.config.isConfigured &&
         sftpSyncService.config.autoSyncOnLoadAndSave) {
@@ -134,11 +138,45 @@ class VaultManager with ChangeNotifier {
       final key = await cryptoService.deriveMasterKey(masterPassword, _vault!.salt);
       _masterKey = key;
 
-      // Try decrypting servers. If any server fails auth tag check, bad password.
-      for (final server in _vault!.servers) {
-        if (server.encryptedCredentials != null) {
+      if (_vault!.isEncryptedEnvelope) {
+        // Version 2 Zero-Knowledge envelope: decrypt all inner servers, tasks, stored_strings
+        try {
+          await _vault!.decryptPayload(cryptoService, key);
+        } catch (e) {
+          _masterKey = null;
+          _errorMessage = 'Invalid master password or corrupted vault payload.';
+          notifyListeners();
+          return false;
+        }
+
+        // Decrypt individual server credentials
+        for (final server in _vault!.servers) {
+          if (server.encryptedCredentials != null) {
+            try {
+              await server.decrypt(cryptoService, key);
+            } catch (_) {}
+          }
+        }
+      } else {
+        // Legacy Version 1 vault: check each server credential
+        for (final server in _vault!.servers) {
+          if (server.encryptedCredentials != null) {
+            try {
+              await server.decrypt(cryptoService, key);
+            } catch (e) {
+              _masterKey = null;
+              _errorMessage = 'Invalid master password or corrupted credential payload.';
+              notifyListeners();
+              return false;
+            }
+          }
+        }
+        if (_vault!.encryptedSftpSyncConfig != null) {
           try {
-            await server.decrypt(cryptoService, key);
+            await cryptoService.decryptPayload(
+              encryptedData: _vault!.encryptedSftpSyncConfig!,
+              masterKey: key,
+            );
           } catch (e) {
             _masterKey = null;
             _errorMessage = 'Invalid master password or corrupted credential payload.';
@@ -146,6 +184,10 @@ class VaultManager with ChangeNotifier {
             return false;
           }
         }
+
+        // Upgrade legacy V1 vault to Version 2 Zero-Knowledge envelope
+        await _vault!.encryptPayload(cryptoService, key);
+        await storageProvider.saveVault(_vault!);
       }
 
       if (_vault!.encryptedSftpSyncConfig != null) {
@@ -158,12 +200,7 @@ class VaultManager with ChangeNotifier {
           if (!sftpSyncService.config.isConfigured && vaultSftp.isConfigured) {
             await sftpSyncService.saveConfig(vaultSftp);
           }
-        } catch (e) {
-          _masterKey = null;
-          _errorMessage = 'Invalid master password or corrupted credential payload.';
-          notifyListeners();
-          return false;
-        }
+        } catch (_) {}
       }
 
       _isUnlocked = true;
@@ -171,7 +208,7 @@ class VaultManager with ChangeNotifier {
 
       if (sftpSyncService.config.isConfigured) {
         await _syncSftpSyncConfigToVault();
-        await storageProvider.saveVault(_vault!);
+        await _persistVault();
       }
 
       notifyListeners();
@@ -191,6 +228,12 @@ class VaultManager with ChangeNotifier {
     _isUnlocked = false;
     for (final server in _vault?.servers ?? <ServerConfig>[]) {
       server.decryptedCredentials = null;
+    }
+    // If the vault is an encrypted envelope, clear plaintext lists from memory while locked
+    if (_vault?.isEncryptedEnvelope == true) {
+      _vault!.servers = [];
+      _vault!.tasks = [];
+      _vault!.storedStrings = [];
     }
     notifyListeners();
   }
@@ -227,6 +270,11 @@ class VaultManager with ChangeNotifier {
 
     // Derive the imported vault's key using the supplied password and the imported salt
     final importedKey = await cryptoService.deriveMasterKey(masterPassword, importedVault.salt);
+
+    // If imported vault is a Version 2 envelope, decrypt it first
+    if (importedVault.isEncryptedEnvelope) {
+      await importedVault.decryptPayload(cryptoService, importedKey);
+    }
 
     int count = 0;
     for (final server in importedVault.servers) {
@@ -301,6 +349,10 @@ class VaultManager with ChangeNotifier {
     final importedVault = SyncVaultFile.fromJson(data);
     final key = await cryptoService.deriveMasterKey(masterPassword, importedVault.salt);
 
+    if (importedVault.isEncryptedEnvelope) {
+      await importedVault.decryptPayload(cryptoService, key);
+    }
+
     for (final server in importedVault.servers) {
       if (server.encryptedCredentials != null) {
         await server.decrypt(cryptoService, key);
@@ -327,7 +379,7 @@ class VaultManager with ChangeNotifier {
     _loadedSource = 'Imported JSON';
 
     await _syncSftpSyncConfigToVault();
-    await storageProvider.saveVault(_vault!);
+    await _persistVault();
     notifyListeners();
     return (
       serverCount: _vault!.servers.length,
@@ -424,6 +476,7 @@ class VaultManager with ChangeNotifier {
     }
     if (_isUnlocked && _masterKey != null) {
       await _syncSftpSyncConfigToVault();
+      await _vault!.encryptPayload(cryptoService, _masterKey!);
       await storageProvider.saveVault(_vault!);
     }
     return _vault!.toFormattedJson();
@@ -436,6 +489,9 @@ class VaultManager with ChangeNotifier {
     }
     _vault!.updatedAt = DateTime.now().toUtc();
     await _syncSftpSyncConfigToVault();
+    if (_masterKey != null) {
+      await _vault!.encryptPayload(cryptoService, _masterKey!);
+    }
     await storageProvider.saveVault(_vault!);
     final jsonString = _vault!.toFormattedJson();
     return await sftpSyncService.uploadVaultJson(
@@ -482,7 +538,8 @@ class VaultManager with ChangeNotifier {
         (_vault!.servers.isNotEmpty ||
             _vault!.tasks.isNotEmpty ||
             _vault!.storedStrings.isNotEmpty ||
-            _vault!.encryptedSftpSyncConfig != null);
+            _vault!.encryptedSftpSyncConfig != null ||
+            _vault!.vaultPayload != null);
     if (_vault == null ||
         SyncVaultFile.isNewerVault(
           newest.vault,
