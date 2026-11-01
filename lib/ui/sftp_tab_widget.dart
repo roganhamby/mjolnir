@@ -11,6 +11,7 @@ import 'package:path/path.dart' as p;
 import '../models/server_config.dart';
 import '../models/task_item.dart';
 import '../services/ssh_service.dart';
+import '../services/known_hosts_service.dart';
 import 'task_manager_tab_widget.dart';
 import 'app_notification.dart';
 
@@ -482,6 +483,40 @@ class _SftpTabWidgetState extends State<SftpTabWidget> {
           : '~/';
       await _loadRemoteDirectory(configuredPath);
     } catch (e) {
+      if (e is HostKeyMismatchException) {
+        if (mounted) {
+          setState(() {
+            _isRemoteLoading = false;
+            _remoteErrorMessage = 'SECURITY ALERT: REMOTE HOST IDENTIFICATION CHANGED!\n'
+                'Host key mismatch detected for ${e.host}:${e.port} (${e.keyType}).\n'
+                'Offending key: ${e.receivedFingerprint}\n'
+                'Expected key:  ${e.expectedFingerprint}\n\n'
+                'Potential Man-in-the-Middle attack. SFTP connection aborted to protect credentials.';
+          });
+          AppNotification.show(
+            context,
+            message: 'SECURITY ALERT: Host key mismatch for ${e.host}! Connection blocked.',
+            isError: true,
+            duration: const Duration(seconds: 8),
+          );
+        }
+        return;
+      } else if (e is HostKeyUnknownException) {
+        if (mounted) {
+          setState(() {
+            _isRemoteLoading = false;
+            _remoteErrorMessage = 'SFTP connection aborted: Host key was not verified for ${e.host}:${e.port}.';
+          });
+          AppNotification.show(
+            context,
+            message: 'SFTP connection aborted: Host key verification declined.',
+            isError: false,
+            duration: const Duration(seconds: 4),
+          );
+        }
+        return;
+      }
+
       if (mounted) {
         setState(() {
           _isRemoteLoading = false;

@@ -50,6 +50,7 @@ class ServerConfig {
   AuthType authType;
   double terminalFontSize;
   String terminalTheme;
+  String? expectedHostKey;
   Map<String, dynamic>? encryptedCredentials;
   DateTime updatedAt;
 
@@ -69,6 +70,7 @@ class ServerConfig {
     this.authType = AuthType.password,
     this.terminalFontSize = 13.0,
     this.terminalTheme = 'Default Dark',
+    this.expectedHostKey,
     this.encryptedCredentials,
     DateTime? updatedAt,
     this.decryptedCredentials,
@@ -87,6 +89,8 @@ class ServerConfig {
         'auth_type': authType.name,
         'terminal_font_size': terminalFontSize,
         'terminal_theme': terminalTheme,
+        if (expectedHostKey != null && expectedHostKey!.trim().isNotEmpty)
+          'expected_host_key': expectedHostKey!.trim(),
         'encrypted_credentials': encryptedCredentials,
         'updated_at': updatedAt.toIso8601String(),
       };
@@ -120,6 +124,7 @@ class ServerConfig {
       ),
       terminalFontSize: (json['terminal_font_size'] as num?)?.toDouble() ?? 13.0,
       terminalTheme: json['terminal_theme'] as String? ?? 'Default Dark',
+      expectedHostKey: json['expected_host_key'] as String?,
       encryptedCredentials: json['encrypted_credentials'] as Map<String, dynamic>?,
       updatedAt: json['updated_at'] != null
           ? DateTime.tryParse(json['updated_at'] as String)?.toUtc() ?? DateTime.now().toUtc()

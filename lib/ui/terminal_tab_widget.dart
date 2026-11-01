@@ -12,6 +12,7 @@ import 'package:xterm/xterm.dart';
 import '../models/server_config.dart';
 import '../models/task_item.dart';
 import '../services/ssh_service.dart';
+import '../services/known_hosts_service.dart';
 import '../theme/ansi_themes.dart';
 import '../theme/app_color_schemes.dart';
 import 'task_manager_tab_widget.dart';
@@ -1239,6 +1240,44 @@ Total Characters Logged: $_screenLogBytesWritten
       });
       _requestTerminalFocus();
     } catch (e) {
+      if (e is HostKeyMismatchException) {
+        _autoReconnectCancelled = true;
+        _reconnectTimer?.cancel();
+        setState(() {
+          _isLoading = false;
+          _errorMessage = 'HOST KEY VERIFICATION FAILED: REMOTE HOST IDENTIFICATION HAS CHANGED!';
+          _isDisconnected = true;
+          _disconnectReason = 'Host key mismatch for ${e.host}:${e.port} (Potential MITM Attack)';
+        });
+        final warning = '\r\n\x1b[1;31m'
+            '@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@\r\n'
+            '@    WARNING: REMOTE HOST IDENTIFICATION HAS CHANGED!     @\r\n'
+            '@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@\r\n'
+            'IT IS POSSIBLE THAT SOMEONE IS DOING SOMETHING NASTY!\r\n'
+            'Someone could be eavesdropping on you right now (man-in-the-middle attack)!\r\n'
+            'Host key verification failed for ${e.host}:${e.port} (${e.keyType}).\r\n'
+            'Offending key fingerprint: ${e.receivedFingerprint}\r\n'
+            'Expected fingerprint:      ${e.expectedFingerprint}\r\n'
+            'Connection aborted to protect credentials and data integrity.\x1b[0m\r\n\r\n';
+        terminal.write(warning);
+        _logStreamData(warning);
+        return;
+      } else if (e is HostKeyUnknownException) {
+        _autoReconnectCancelled = true;
+        _reconnectTimer?.cancel();
+        setState(() {
+          _isLoading = false;
+          _errorMessage = 'Host key verification rejected by user.';
+          _isDisconnected = true;
+          _disconnectReason = 'Host key unverified for ${e.host}:${e.port}';
+        });
+        final msg = '\r\n\x1b[1;33m[Host key verification declined for ${e.host}:${e.port}]\x1b[0m\r\n'
+            'Connection aborted.\r\n\r\n';
+        terminal.write(msg);
+        _logStreamData(msg);
+        return;
+      }
+
       setState(() {
         _isLoading = false;
         _errorMessage = e.toString();

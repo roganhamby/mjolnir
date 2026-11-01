@@ -19,6 +19,8 @@ import 'ui/sftp_tab_widget.dart';
 import 'ui/task_manager_tab_widget.dart';
 import 'ui/stored_strings_tab_widget.dart';
 import 'ui/server_edit_dialog.dart';
+import 'ui/host_key_verify_dialog.dart';
+import 'ui/known_hosts_manager_dialog.dart';
 import 'ui/app_notification.dart';
 import 'theme/ansi_themes.dart';
 import 'theme/app_color_schemes.dart';
@@ -185,6 +187,26 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
+
+    _sshService.hostKeyPromptHandler = ({
+      required ServerConfig server,
+      required String keyType,
+      required String fingerprint,
+      required bool isMismatch,
+      String? previousFingerprint,
+    }) async {
+      final navContext = AppNotification.navigatorKey.currentContext;
+      if (navContext == null) return false;
+      return await HostKeyVerifyDialog.show(
+        navContext,
+        server: server,
+        keyType: keyType,
+        fingerprint: fingerprint,
+        isMismatch: isMismatch,
+        previousFingerprint: previousFingerprint,
+      );
+    };
+
     if (widget.vaultManager != null) {
       _vaultManager = widget.vaultManager!;
     } else {
@@ -1788,6 +1810,11 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
               icon: const Icon(Icons.add, size: 20),
               tooltip: 'Add Server',
               onPressed: () => _showAddOrEditServerDialog(),
+            ),
+            IconButton(
+              icon: const Icon(Icons.shield_outlined, size: 20),
+              tooltip: 'Known Hosts & Key Security',
+              onPressed: () => KnownHostsManagerDialog.show(context),
             ),
             IconButton(
               icon: const Icon(Icons.lock_outline, size: 20),

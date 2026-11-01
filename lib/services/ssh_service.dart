@@ -5,6 +5,15 @@ import 'package:cryptography/cryptography.dart' show Sha1;
 import 'package:dartssh2/dartssh2.dart';
 import 'package:path/path.dart' as p;
 import '../models/server_config.dart';
+import 'known_hosts_service.dart';
+
+typedef HostKeyPromptHandler = Future<bool> Function({
+  required ServerConfig server,
+  required String keyType,
+  required String fingerprint,
+  required bool isMismatch,
+  String? previousFingerprint,
+});
 
 class SshSession {
   final ServerConfig server;
@@ -49,6 +58,14 @@ class SftpSession {
 }
 
 class SshService {
+  final KnownHostsService knownHostsService;
+  HostKeyPromptHandler? hostKeyPromptHandler;
+
+  SshService({
+    KnownHostsService? knownHostsService,
+    this.hostKeyPromptHandler,
+  }) : knownHostsService = knownHostsService ?? KnownHostsService.instance;
+
   /// Algorithm set that prioritizes modern OpenSSH algorithms while appending
   /// legacy compatibility algorithms (such as `+ssh-rsa` / `SSHHostkeyType.rsaSha1`,
   /// SHA-1 Diffie-Hellman key exchanges, and CBC ciphers) as fallbacks for older
@@ -213,7 +230,10 @@ class SshService {
   }
 
   /// Establish an authenticated SSHClient instance based on server auth settings.
-  Future<SSHClient> connect(ServerConfig server) async {
+  Future<SSHClient> connect(
+    ServerConfig server, {
+    HostKeyPromptHandler? onPromptHostKey,
+  }) async {
     final credentials = server.decryptedCredentials;
     final socket = await SSHSocket.connect(
       server.host,
@@ -240,12 +260,90 @@ class SshService {
     final password = credentials?.password;
     final hasPassword = password != null && password.isNotEmpty;
 
+    Exception? hostKeyException;
+
     final client = SSHClient(
       socket,
       username: server.username,
       algorithms: compatibleAlgorithms,
       identities: identities,
       keepAliveInterval: const Duration(seconds: 25),
+      onVerifyHostKey: (type, rawFingerprint) async {
+        final fingerprint = utf8.decode(rawFingerprint, allowMalformed: true).trim();
+        final host = server.host.trim();
+        final port = server.port <= 0 ? 22 : server.port;
+
+        // Check if server config explicitly pins an expected host key fingerprint
+        final pinned = server.expectedHostKey?.trim();
+        if (pinned != null && pinned.isNotEmpty) {
+          if (pinned != fingerprint) {
+            hostKeyException = HostKeyMismatchException(
+              host: host,
+              port: port,
+              keyType: type,
+              expectedFingerprint: pinned,
+              receivedFingerprint: fingerprint,
+            );
+            return false;
+          }
+          return true;
+        }
+
+        // Verify against KnownHostsService
+        final result = await knownHostsService.verifyHostKey(
+          host: host,
+          port: port,
+          keyType: type,
+          fingerprint: fingerprint,
+        );
+
+        if (result.isTrusted) {
+          return true;
+        }
+
+        final isMismatch = result.isMismatch;
+        final prevFp = result.previousFingerprint;
+
+        final prompter = onPromptHostKey ?? hostKeyPromptHandler;
+        if (prompter != null) {
+          final accepted = await prompter(
+            server: server,
+            keyType: type,
+            fingerprint: fingerprint,
+            isMismatch: isMismatch,
+            previousFingerprint: prevFp,
+          );
+
+          if (accepted) {
+            await knownHostsService.trustHostKey(
+              host: host,
+              port: port,
+              keyType: type,
+              fingerprint: fingerprint,
+            );
+            return true;
+          }
+        }
+
+        if (isMismatch) {
+          hostKeyException = HostKeyMismatchException(
+            host: host,
+            port: port,
+            keyType: type,
+            expectedFingerprint: prevFp ?? 'UNKNOWN',
+            receivedFingerprint: fingerprint,
+          );
+        } else {
+          hostKeyException = HostKeyUnknownException(
+            host: host,
+            port: port,
+            keyType: type,
+            fingerprint: fingerprint,
+          );
+        }
+
+        return false;
+      },
       onPasswordRequest: () {
         if (password != null) {
           return password;
@@ -262,8 +360,15 @@ class SshService {
           : null,
     );
 
-    // Wait until authenticated
-    await client.authenticated;
+    try {
+      // Wait until authenticated
+      await client.authenticated;
+    } catch (e) {
+      if (hostKeyException != null) {
+        throw hostKeyException!;
+      }
+      rethrow;
+    }
     return client;
   }
 
@@ -278,8 +383,9 @@ class SshService {
     int Function()? getTerminalHeight,
     int Function()? getTerminalPixelWidth,
     int Function()? getTerminalPixelHeight,
+    HostKeyPromptHandler? onPromptHostKey,
   }) async {
-    final client = await connect(server);
+    final client = await connect(server, onPromptHostKey: onPromptHostKey);
     final width = getTerminalWidth?.call() ?? terminalWidth;
     final height = getTerminalHeight?.call() ?? terminalHeight;
     final pixelWidth = getTerminalPixelWidth?.call() ?? terminalPixelWidth;
@@ -301,8 +407,11 @@ class SshService {
   }
 
   /// Opens an SFTP client session.
-  Future<SftpSession> startSftpSession(ServerConfig server) async {
-    final client = await connect(server);
+  Future<SftpSession> startSftpSession(
+    ServerConfig server, {
+    HostKeyPromptHandler? onPromptHostKey,
+  }) async {
+    final client = await connect(server, onPromptHostKey: onPromptHostKey);
     final sftp = await client.sftp();
     return SftpSession(
       server: server,

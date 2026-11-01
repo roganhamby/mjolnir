@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:uuid/uuid.dart';
 import '../models/server_config.dart';
+import '../services/known_hosts_service.dart';
 import '../theme/ansi_themes.dart';
 
 class ServerEditDialog extends StatefulWidget {
@@ -29,7 +30,9 @@ class _ServerEditDialogState extends State<ServerEditDialog> {
   late TextEditingController _passwordController;
   late TextEditingController _privateKeyController;
   late TextEditingController _passphraseController;
+  late TextEditingController _expectedHostKeyController;
 
+  List<KnownHostEntry> _knownEntries = [];
   ConnectionType _connectionType = ConnectionType.ssh;
   AuthType _authType = AuthType.password;
   bool _obscurePassword = true;
@@ -56,6 +59,25 @@ class _ServerEditDialogState extends State<ServerEditDialog> {
     _passwordController = TextEditingController(text: s?.decryptedCredentials?.password ?? '');
     _privateKeyController = TextEditingController(text: s?.decryptedCredentials?.privateKey ?? '');
     _passphraseController = TextEditingController(text: s?.decryptedCredentials?.passphrase ?? '');
+    _expectedHostKeyController = TextEditingController(text: s?.expectedHostKey ?? '');
+
+    _loadKnownEntries();
+  }
+
+  Future<void> _loadKnownEntries() async {
+    final host = _hostController.text.trim();
+    final port = int.tryParse(_portController.text.trim()) ?? 22;
+    if (host.isNotEmpty) {
+      final entries = await KnownHostsService.instance.getEntriesForHost(
+        host: host,
+        port: port,
+      );
+      if (mounted) {
+        setState(() {
+          _knownEntries = entries;
+        });
+      }
+    }
   }
 
   @override
@@ -69,6 +91,7 @@ class _ServerEditDialogState extends State<ServerEditDialog> {
     _passwordController.dispose();
     _privateKeyController.dispose();
     _passphraseController.dispose();
+    _expectedHostKeyController.dispose();
     super.dispose();
   }
 
@@ -100,6 +123,9 @@ class _ServerEditDialogState extends State<ServerEditDialog> {
       authType: _authType,
       terminalFontSize: widget.initialServer?.terminalFontSize ?? 13.0,
       terminalTheme: _terminalTheme,
+      expectedHostKey: _expectedHostKeyController.text.trim().isEmpty
+          ? null
+          : _expectedHostKeyController.text.trim(),
       decryptedCredentials: credentials,
     );
 
@@ -269,6 +295,94 @@ class _ServerEditDialogState extends State<ServerEditDialog> {
                     obscureText: true,
                     decoration: const InputDecoration(
                       labelText: 'Passphrase (if key is encrypted)',
+                    ),
+                  ),
+                ],
+                const SizedBox(height: 16),
+                const Divider(),
+                const SizedBox(height: 8),
+                Row(
+                  children: [
+                    const Icon(Icons.security, size: 18, color: Colors.blueAccent),
+                    const SizedBox(width: 8),
+                    const Text(
+                      'Host Key Verification & Pinning',
+                      style: TextStyle(fontWeight: FontWeight.bold, fontSize: 13),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 8),
+                TextFormField(
+                  controller: _expectedHostKeyController,
+                  decoration: const InputDecoration(
+                    labelText: 'Pinned Host Key Fingerprint (Optional)',
+                    hintText: 'SHA256:...',
+                    helperText: 'Enforce strict SHA256 fingerprint matching to prevent MITM attacks.',
+                    border: OutlineInputBorder(),
+                    contentPadding: EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+                  ),
+                ),
+                if (_knownEntries.isNotEmpty) ...[
+                  const SizedBox(height: 12),
+                  Container(
+                    padding: const EdgeInsets.all(10),
+                    decoration: BoxDecoration(
+                      color: Colors.blueGrey.withOpacity(0.08),
+                      borderRadius: BorderRadius.circular(8),
+                      border: Border.all(color: Colors.blueGrey.withOpacity(0.2)),
+                    ),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Row(
+                          children: [
+                            const Icon(Icons.verified_user, size: 16, color: Colors.green),
+                            const SizedBox(width: 6),
+                            Text(
+                              'Stored Trusted Host Keys (${_knownEntries.length})',
+                              style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 12),
+                            ),
+                          ],
+                        ),
+                        const SizedBox(height: 6),
+                        ..._knownEntries.map((e) => Padding(
+                              padding: const EdgeInsets.symmetric(vertical: 4),
+                              child: Row(
+                                children: [
+                                  Expanded(
+                                    child: Column(
+                                      crossAxisAlignment: CrossAxisAlignment.start,
+                                      children: [
+                                        Text(
+                                          '${e.keyType}:',
+                                          style: const TextStyle(fontWeight: FontWeight.w600, fontSize: 11),
+                                        ),
+                                        Text(
+                                          e.fingerprint,
+                                          style: const TextStyle(
+                                            fontFamily: 'monospace',
+                                            fontSize: 10,
+                                          ),
+                                        ),
+                                      ],
+                                    ),
+                                  ),
+                                  TextButton.icon(
+                                    icon: const Icon(Icons.delete_outline, size: 14, color: Colors.orangeAccent),
+                                    label: const Text('Reset', style: TextStyle(fontSize: 11, color: Colors.orangeAccent)),
+                                    onPressed: () async {
+                                      await KnownHostsService.instance.removeHostKey(
+                                        host: e.host,
+                                        port: e.port,
+                                        keyType: e.keyType,
+                                      );
+                                      await _loadKnownEntries();
+                                    },
+                                  ),
+                                ],
+                              ),
+                            )),
+                      ],
                     ),
                   ),
                 ],
