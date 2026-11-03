@@ -19,6 +19,28 @@ final class _WinSize extends Struct {
   external int ws_ypixel;
 }
 
+final class _PollFd extends Struct {
+  @Int32()
+  external int fd;
+
+  @Int16()
+  external int events;
+
+  @Int16()
+  external int revents;
+}
+
+typedef _PollNative = Int32 Function(
+  Pointer<_PollFd> fds,
+  Uint64 nfds,
+  Int32 timeout,
+);
+typedef _PollDart = int Function(
+  Pointer<_PollFd> fds,
+  int nfds,
+  int timeout,
+);
+
 typedef _PosixOpenptNative = Int32 Function(Int32 flags);
 typedef _PosixOpenptDart = int Function(int flags);
 
@@ -30,8 +52,8 @@ typedef _PtsnameDart = Pointer<Uint8> Function(int fd);
 
 typedef _IoctlNative = Int32 Function(
   Int32 fd,
-  Uint64 request,
-  Pointer<_WinSize> argp,
+  UnsignedLong request,
+  VarArgs<(Pointer<_WinSize>,)>,
 );
 typedef _IoctlDart = int Function(
   int fd,
@@ -160,6 +182,7 @@ class _PtyReaderArgs {
 
 void _ptyReaderIsolateEntry(_PtyReaderArgs args) {
   final lib = _openLibc();
+  final pollFn = lib.lookupFunction<_PollNative, _PollDart>('poll');
   final readFd = lib.lookupFunction<_ReadNative, _ReadDart>('read');
   final waitpid = lib.lookupFunction<_WaitPidNative, _WaitPidDart>('waitpid');
   final malloc = lib.lookupFunction<_MallocNative, _MallocDart>('malloc');
@@ -167,26 +190,52 @@ void _ptyReaderIsolateEntry(_PtyReaderArgs args) {
   final free = lib.lookupFunction<_FreeNative, _FreeDart>('free');
 
   const bufSize = 4096;
+  const pollIn = 0x0001;
+  const pollErr = 0x0008;
+  const pollHup = 0x0010;
+  const pollNval = 0x0020;
+
   final buf = malloc(bufSize).cast<Uint8>();
+  final pfd = calloc(1, sizeOf<_PollFd>()).cast<_PollFd>();
+  pfd.ref.fd = args.masterFd;
+  pfd.ref.events = pollIn;
 
   try {
     while (true) {
-      final n = readFd(args.masterFd, buf, bufSize);
-      if (n > 0) {
-        final chunk = Uint8List.fromList(buf.asTypedList(n));
-        args.sendPort.send(chunk);
-      } else {
+      pfd.ref.revents = 0;
+      final pollRc = pollFn(pfd, 1, 100);
+      if (pollRc == 0) {
+        continue;
+      }
+      if (pollRc < 0) {
+        break;
+      }
+      final revents = pfd.ref.revents;
+      if ((revents & pollNval) != 0) {
+        break;
+      }
+      if ((revents & pollIn) != 0) {
+        final n = readFd(args.masterFd, buf, bufSize);
+        if (n > 0) {
+          final chunk = Uint8List.fromList(buf.asTypedList(n));
+          args.sendPort.send(chunk);
+        } else {
+          break;
+        }
+      } else if ((revents & (pollHup | pollErr)) != 0) {
         break;
       }
     }
   } finally {
+    free(pfd.cast());
     free(buf.cast());
   }
 
   final statusPtr = calloc(1, 4).cast<Int32>();
   int exitCode = 0;
   try {
-    final rc = waitpid(args.childPid, statusPtr, 0);
+    // WNOHANG = 1 on both Linux and macOS
+    final rc = waitpid(args.childPid, statusPtr, 1);
     if (rc > 0) {
       final rawStatus = statusPtr.value;
       exitCode = (rawStatus >> 8) & 0xff;

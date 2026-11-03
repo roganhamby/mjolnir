@@ -123,7 +123,7 @@ void main() {
 
       session.resizeTerminal(120, 40);
       session.write(
-        Uint8List.fromList(utf8.encode('echo MJOLNIR_PTY_OK; tty\n')),
+        Uint8List.fromList(utf8.encode('echo MJOLNIR_PTY_OK\r\nexit\r\n')),
       );
 
       await completer.future.timeout(const Duration(seconds: 5));
@@ -136,16 +136,20 @@ void main() {
   });
 
   group('Sidebar Local Shell Integration Tests', () {
+    late VaultManager vaultManager;
+
+    setUp(() async {
+      final provider = _InMemoryStorageProvider();
+      vaultManager = VaultManager(storageProvider: provider);
+      await vaultManager.init();
+      await vaultManager.unlock('test-password-123');
+    });
+
     testWidgets('Clicking Local Shell in left sidebar opens a Local Shell terminal tab', (tester) async {
       tester.view.physicalSize = const Size(1280, 800);
       tester.view.devicePixelRatio = 1.0;
       addTearDown(tester.view.resetPhysicalSize);
       addTearDown(tester.view.resetDevicePixelRatio);
-
-      final provider = _InMemoryStorageProvider();
-      final vaultManager = VaultManager(storageProvider: provider);
-      await vaultManager.init();
-      await vaultManager.unlock('test-password-123');
 
       final fakeShellService = _FakeLocalShellService();
 
