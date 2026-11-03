@@ -11,6 +11,7 @@ import 'package:path_provider/path_provider.dart';
 import 'package:xterm/xterm.dart';
 import '../models/server_config.dart';
 import '../models/task_item.dart';
+import '../services/local_shell_service.dart';
 import '../services/ssh_service.dart';
 import '../services/known_hosts_service.dart';
 import '../theme/ansi_themes.dart';
@@ -21,6 +22,8 @@ import 'app_notification.dart';
 class TerminalTabWidget extends StatefulWidget {
   final ServerConfig server;
   final SshService sshService;
+  final bool isLocalShell;
+  final LocalShellService localShellService;
   final TerminalTheme theme;
   final String? initialThemeName;
   final double fontSize;
@@ -38,6 +41,8 @@ class TerminalTabWidget extends StatefulWidget {
     super.key,
     required this.server,
     required this.sshService,
+    this.isLocalShell = false,
+    this.localShellService = const LocalShellService(),
     this.theme = TerminalThemes.defaultTheme,
     this.initialThemeName,
     this.fontSize = 13.0,
@@ -134,6 +139,7 @@ class _TerminalTabWidgetState extends State<TerminalTabWidget>
   late final ScrollController _scrollController;
   late final FocusNode _terminalFocusNode;
   SshSession? _sshSession;
+  LocalShellSession? _localSession;
   bool _isLoading = true;
   String? _errorMessage;
   bool _isExited = false;
@@ -188,13 +194,27 @@ class _TerminalTabWidgetState extends State<TerminalTabWidget>
     int? cellWidth,
     int? cellHeight,
   }) {
-    final session = _sshSession?.session;
-    if (session == null) return;
     final w = width ?? terminal.viewWidth;
     final h = height ?? terminal.viewHeight;
     if (w <= 0 || h <= 0) return;
     final cw = cellWidth ?? _lastCellWidth;
     final ch = cellHeight ?? _lastCellHeight;
+
+    final localSession = _localSession;
+    if (localSession != null) {
+      try {
+        localSession.resizeTerminal(
+          w,
+          h,
+          cw > 0 ? w * cw : 0,
+          ch > 0 ? h * ch : 0,
+        );
+      } catch (_) {}
+      return;
+    }
+
+    final session = _sshSession?.session;
+    if (session == null) return;
     try {
       session.resizeTerminal(
         w,
@@ -1098,7 +1118,118 @@ Total Characters Logged: $_screenLogBytesWritten
     }
   }
 
-  // --- SSH Connection Handling ---
+  // --- SSH & Local Shell Connection Handling ---
+
+  Future<void> _connectLocalShell() async {
+    try {
+      await WidgetsBinding.instance.endOfFrame;
+      if (!mounted) return;
+
+      final session = await widget.localShellService.startLocalShellSession(
+        terminalWidth: terminal.viewWidth > 0 ? terminal.viewWidth : 80,
+        terminalHeight: terminal.viewHeight > 0 ? terminal.viewHeight : 24,
+        terminalPixelWidth:
+            _lastCellWidth > 0 ? terminal.viewWidth * _lastCellWidth : 0,
+        terminalPixelHeight:
+            _lastCellHeight > 0 ? terminal.viewHeight * _lastCellHeight : 0,
+      );
+
+      if (!mounted) {
+        session.close();
+        return;
+      }
+
+      _localSession = session;
+      _isDisconnected = false;
+      _disconnectReason = null;
+      _reconnectAttempt = 0;
+      _autoReconnectCancelled = false;
+
+      if (!terminal.isUsingAltBuffer) {
+        terminal.mainBuffer.resetVerticalMargins();
+      }
+      _syncRemotePtySize();
+
+      session.stdout.listen(
+        (data) {
+          final text = utf8.decode(data, allowMalformed: true);
+          _writeToTerminal(text);
+          _logStreamData(text);
+        },
+        onError: (err) {
+          final errStr = '\r\n[Local shell error: $err]\r\n';
+          _writeToTerminal(errStr);
+          _logStreamData(errStr);
+        },
+        onDone: () {
+          final doneStr = '\r\n[Local shell exited]\r\n';
+          _writeToTerminal(doneStr);
+          _logStreamData(doneStr);
+          _handleSessionDone();
+        },
+      );
+
+      session.stderr.listen((data) {
+        final text = utf8.decode(data, allowMalformed: true);
+        _writeToTerminal(text);
+        _logStreamData(text);
+      });
+
+      terminal.onOutput = (data) {
+        if (_isDisconnected && !_isLoading) {
+          if (data.contains('\r') || data.contains('\n') || data == ' ') {
+            _reconnect();
+            return;
+          }
+        }
+        if (data == '\x1b[>0;0;0c') {
+          session.write(Uint8List.fromList(utf8.encode('\x1b[>0;279;0c')));
+          return;
+        }
+        if (_ctrlModifierActive && data.isNotEmpty) {
+          final code = data.toLowerCase().codeUnitAt(0);
+          setState(() => _ctrlModifierActive = false);
+          if (code >= 97 && code <= 122) {
+            session.write(Uint8List.fromList([code - 96]));
+            if (data.length > 1) {
+              session.write(
+                Uint8List.fromList(utf8.encode(data.substring(1))),
+              );
+            }
+            return;
+          }
+        }
+        session.write(Uint8List.fromList(utf8.encode(data)));
+      };
+
+      terminal.onResize = _handleTerminalResize;
+
+      setState(() {
+        _isLoading = false;
+        _isDisconnected = false;
+      });
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) {
+          if (!terminal.isUsingAltBuffer) {
+            terminal.mainBuffer.resetVerticalMargins();
+          }
+          _syncRemotePtySize();
+        }
+      });
+      _requestTerminalFocus();
+    } catch (e) {
+      _autoReconnectCancelled = true;
+      setState(() {
+        _isLoading = false;
+        _errorMessage = e.toString();
+        _isDisconnected = true;
+        _disconnectReason = e.toString();
+      });
+      final failMsg = '\r\n[Failed to start local shell: $e]\r\n';
+      terminal.write(failMsg);
+      _logStreamData(failMsg);
+    }
+  }
 
   Future<void> _connect() async {
     _reconnectTimer?.cancel();
@@ -1110,6 +1241,11 @@ Total Characters Logged: $_screenLogBytesWritten
       _isExited = false;
       _reconnectCountdown = 0;
     });
+
+    if (widget.isLocalShell) {
+      await _connectLocalShell();
+      return;
+    }
 
     final connectMsg = 'Connecting to ${widget.server.username}@${widget.server.host}:${widget.server.port}...\r\n';
     terminal.write(connectMsg);
@@ -1349,6 +1485,8 @@ Total Characters Logged: $_screenLogBytesWritten
     _reconnectTimer = null;
     _sshSession?.close();
     _sshSession = null;
+    _localSession?.close();
+    _localSession = null;
     await _connect();
   }
 
@@ -1378,6 +1516,7 @@ Total Characters Logged: $_screenLogBytesWritten
     _reconnectTimer?.cancel();
     _reconnectTimer = null;
     _sshSession?.close();
+    _localSession?.close();
     _stopScreenLogging();
     _terminalController.dispose();
     _scrollController.dispose();
@@ -1386,6 +1525,12 @@ Total Characters Logged: $_screenLogBytesWritten
   }
 
   void _sendRawToShell(List<int> bytes) {
+    final localSession = _localSession;
+    if (localSession != null) {
+      localSession.write(Uint8List.fromList(bytes));
+      _requestTerminalFocus();
+      return;
+    }
     final session = _sshSession?.session;
     if (session != null) {
       session.stdin.add(Uint8List.fromList(bytes));
@@ -1613,7 +1758,9 @@ Total Characters Logged: $_screenLogBytesWritten
               const SizedBox(width: 8),
               Flexible(
                 child: Text(
-                  '${widget.server.name} (${widget.server.username}@${widget.server.host})',
+                  widget.isLocalShell
+                      ? '${widget.server.name} (${_localSession?.shellPath ?? LocalShellService.resolveDefaultShell()})'
+                      : '${widget.server.name} (${widget.server.username}@${widget.server.host})',
                   style: TextStyle(
                     color: scheme.primaryText,
                     fontWeight: FontWeight.bold,

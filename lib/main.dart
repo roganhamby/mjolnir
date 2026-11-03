@@ -10,6 +10,7 @@ import 'package:intl/intl.dart';
 import 'models/server_config.dart';
 import 'models/task_item.dart';
 import 'models/stored_string_item.dart';
+import 'services/local_shell_service.dart';
 import 'services/sftp_sync_service.dart';
 import 'services/sync_storage_provider.dart';
 import 'services/vault_manager.dart';
@@ -147,6 +148,7 @@ class MainScreen extends StatefulWidget {
   final ValueChanged<String>? onColorSchemeChanged;
   final VaultManager? vaultManager;
   final SshService? sshService;
+  final LocalShellService? localShellService;
 
   const MainScreen({
     super.key,
@@ -154,6 +156,7 @@ class MainScreen extends StatefulWidget {
     this.onColorSchemeChanged,
     this.vaultManager,
     this.sshService,
+    this.localShellService,
   });
 
   @override
@@ -163,6 +166,7 @@ class MainScreen extends StatefulWidget {
 class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
   late final VaultManager _vaultManager;
   late final SshService _sshService;
+  late final LocalShellService _localShellService;
   final GlobalKey _pasteboardButtonKey = GlobalKey();
 
   final List<TabItem> _openTabs = [];
@@ -190,6 +194,7 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
     _sshService = widget.sshService ?? SshService();
+    _localShellService = widget.localShellService ?? const LocalShellService();
 
     _sshService.hostKeyPromptHandler = ({
       required ServerConfig server,
@@ -316,6 +321,37 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
           server: server,
           themeName: themeToUse,
           fontSize: server.terminalFontSize,
+        ),
+      );
+      _activeTabIndex = _openTabs.length - 1;
+      _collapseSidebarIfNarrowScreen();
+    });
+  }
+
+  void _openLocalShellTab() {
+    _stopActiveTabTimer();
+    final tabId = 'local-${DateTime.now().millisecondsSinceEpoch}';
+    final username = Platform.environment['USER'] ??
+        Platform.environment['USERNAME'] ??
+        'local';
+    final localServer = ServerConfig(
+      id: 'local-shell',
+      name: 'Local Shell',
+      host: 'localhost',
+      port: 0,
+      username: username,
+    );
+    setState(() {
+      _openTabs.add(
+        TabItem(
+          id: tabId,
+          title: 'Local Shell',
+          icon: Icons.terminal,
+          color: null,
+          type: 'local',
+          server: localServer,
+          themeName: 'Default Dark',
+          fontSize: 13.0,
         ),
       );
       _activeTabIndex = _openTabs.length - 1;
@@ -705,7 +741,7 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
                     border: OutlineInputBorder(),
                   ),
                 ),
-                if (tab.type == 'ssh') ...[
+                if (tab.type == 'ssh' || tab.type == 'local') ...[
                   const SizedBox(height: 16),
                   const Text('ANSI Terminal Theme:', style: TextStyle(fontWeight: FontWeight.bold)),
                   const SizedBox(height: 8),
@@ -807,7 +843,9 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
                 });
                 // Persist theme or default remote path to server config
                 try {
-                  if (tab.type == 'ssh' && tab.server != null) {
+                  if (tab.type == 'local' && tab.server != null) {
+                    tab.server!.terminalTheme = selectedTheme;
+                  } else if (tab.type == 'ssh' && tab.server != null) {
                     tab.server!.terminalTheme = selectedTheme;
                     await _vaultManager.saveServer(tab.server!);
                   } else if (tab.type == 'sftp' && tab.server != null) {
@@ -2018,6 +2056,50 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
             ],
           ),
         ),
+        // Local Shell Quick Option under the SERVERS header
+        Container(
+          decoration: BoxDecoration(
+            border: Border(bottom: BorderSide(color: scheme.borderColor)),
+          ),
+          child: Material(
+            color: Colors.transparent,
+            child: ListTile(
+              dense: true,
+              leading: Icon(
+                Icons.terminal,
+                size: 20,
+                color: scheme.accentColor,
+              ),
+              title: Row(
+                children: [
+                  const Expanded(
+                    child: Text(
+                      'Local Shell',
+                      style: TextStyle(fontWeight: FontWeight.w600),
+                    ),
+                  ),
+                  Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                    decoration: BoxDecoration(
+                      color: scheme.accentColor.withValues(alpha: 0.22),
+                      borderRadius: BorderRadius.circular(4),
+                    ),
+                    child: const Text(
+                      'LOCAL',
+                      style: TextStyle(fontSize: 9, fontWeight: FontWeight.bold),
+                    ),
+                  ),
+                ],
+              ),
+              subtitle: Text(
+                LocalShellService.resolveDefaultShell(),
+                style: const TextStyle(fontSize: 11),
+                overflow: TextOverflow.ellipsis,
+              ),
+              onTap: _openLocalShellTab,
+            ),
+          ),
+        ),
         // Server List Content
         Expanded(
           child: servers.isEmpty
@@ -2183,7 +2265,7 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
     }
 
     final assignableTabs = _openTabs
-        .where((t) => t.type == 'ssh' || t.type == 'sftp')
+        .where((t) => t.type == 'ssh' || t.type == 'sftp' || t.type == 'local')
         .map((t) => AssignableTabInfo(id: t.id, title: t.title, type: t.type))
         .toList();
 
@@ -2242,7 +2324,7 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
                     final tab = _openTabs[index];
                     final isActive = index == _activeTabIndex;
                     final tabHighlightColor = tab.color ?? (isActive ? scheme.accentColor : Colors.transparent);
-                    final assignedTask = (tab.type == 'ssh' || tab.type == 'sftp')
+                    final assignedTask = (tab.type == 'ssh' || tab.type == 'sftp' || tab.type == 'local')
                         ? _getAssignedTaskForTab(tab.id)
                         : null;
                     final isTaskOverdue = assignedTask?.isOverdue ?? false;
@@ -2426,7 +2508,7 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
             children: _openTabs.asMap().entries.map((entry) {
               final tabIndex = entry.key;
               final t = entry.value;
-              final assignedTask = (t.type == 'ssh' || t.type == 'sftp')
+              final assignedTask = (t.type == 'ssh' || t.type == 'sftp' || t.type == 'local')
                   ? _getAssignedTaskForTab(t.id)
                   : null;
 
@@ -2455,12 +2537,15 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
                     if (mounted) setState(() {});
                   },
                 );
-              } else if (t.type == 'ssh') {
+              } else if (t.type == 'ssh' || t.type == 'local') {
                 final server = t.server!;
+                final isLocal = t.type == 'local';
                 return TerminalTabWidget(
                   key: ValueKey(t.id),
                   server: server,
                   sshService: _sshService,
+                  isLocalShell: isLocal,
+                  localShellService: _localShellService,
                   theme: AnsiThemes.all[server.terminalTheme] ?? AnsiThemes.all[t.themeName] ?? TerminalThemes.defaultTheme,
                   initialThemeName: server.terminalTheme.isNotEmpty ? server.terminalTheme : t.themeName,
                   fontSize: t.fontSize,
@@ -2479,12 +2564,16 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
                   onFontSizeChanged: (newSize) async {
                     t.fontSize = newSize;
                     server.terminalFontSize = newSize;
-                    await _vaultManager.saveServer(server);
+                    if (!isLocal) {
+                      await _vaultManager.saveServer(server);
+                    }
                   },
                   onThemeChanged: (newThemeName) async {
                     t.themeName = newThemeName;
                     server.terminalTheme = newThemeName;
-                    await _vaultManager.saveServer(server);
+                    if (!isLocal) {
+                      await _vaultManager.saveServer(server);
+                    }
                   },
                   onClose: () => _closeTab(t.id),
                   timerWidget: _buildTabTimerWidget(t, tabIndex, tabIndex == _activeTabIndex, scheme),
