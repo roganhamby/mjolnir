@@ -67,19 +67,96 @@ jobs:
       - name: Run unit tests
         run: flutter test
 
+      - name: Install macOS Packaging Tools
+        run: brew install create-dmg
+
       - name: Build macOS Release
         run: flutter build macos --release
 
-      - name: Package macOS App
+      - name: Package macOS DMG & ZIP
+        env:
+          APPLE_CERTIFICATE_BASE64: ${{ secrets.APPLE_CERTIFICATE_BASE64 }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         run: |
+          APP_PATH="build/macos/Build/Products/Release/Mjolnir.app"
+          DMG_NAME="Mjolnir-macOS.dmg"
+          rm -f "$DMG_NAME"
+
+          # Optional: Import Apple certificate and sign application if secrets provided
+          if [ -n "$APPLE_CERTIFICATE_BASE64" ] && [ -n "$APPLE_CERTIFICATE_PASSWORD" ]; then
+            echo "Importing certificate into temporary keychain..."
+            KEYCHAIN_PATH=$RUNNER_TEMP/build_keychain.keychain-db
+            KEYCHAIN_PASSWORD=$(openssl rand -base64 20)
+
+            security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+            security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
+            security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+
+            CERT_PATH=$RUNNER_TEMP/certificate.p12
+            echo "$APPLE_CERTIFICATE_BASE64" | base64 --decode > "$CERT_PATH"
+            security import "$CERT_PATH" -P "$APPLE_CERTIFICATE_PASSWORD" -A -t cert -f pkcs12 -k "$KEYCHAIN_PATH"
+            security set-key-partition-list -S apple-tool:,apple: -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+            security list-keychain -d user -s "$KEYCHAIN_PATH" $(security list-keychains -d user | tr -d '"')
+
+            echo "Signing Mjolnir.app..."
+            codesign --force --deep --options runtime \
+              --entitlements macos/Runner/Release.entitlements \
+              --sign "$APPLE_SIGNING_IDENTITY" \
+              --keychain "$KEYCHAIN_PATH" \
+              "$APP_PATH"
+          fi
+
+          # Create DMG Installer
+          echo "Building styled DMG installer..."
+          VOLICON_ARGS=()
+          if [ -f "$APP_PATH/Contents/Resources/AppIcon.icns" ]; then
+            VOLICON_ARGS=(--volicon "$APP_PATH/Contents/Resources/AppIcon.icns")
+          fi
+
+          create-dmg \
+            --volname "Mjolnir Installer" \
+            "${VOLICON_ARGS[@]}" \
+            --window-pos 200 120 \
+            --window-size 600 400 \
+            --icon-size 100 \
+            --icon "Mjolnir.app" 150 190 \
+            --hide-extension "Mjolnir.app" \
+            --app-drop-link 450 190 \
+            --no-internet-enable \
+            "$DMG_NAME" \
+            "$APP_PATH" || [ $? -eq 2 ]
+
+          # Optional: Sign and notarize DMG if credentials provided
+          if [ -n "$APPLE_SIGNING_IDENTITY" ] && [ -n "$APPLE_CERTIFICATE_BASE64" ]; then
+            echo "Signing $DMG_NAME..."
+            codesign --sign "$APPLE_SIGNING_IDENTITY" "$DMG_NAME"
+          fi
+
+          if [ -n "$APPLE_ID" ] && [ -n "$APPLE_APP_SPECIFIC_PASSWORD" ] && [ -n "$APPLE_TEAM_ID" ]; then
+            echo "Submitting DMG for Apple notarization..."
+            xcrun notarytool submit "$DMG_NAME" \
+              --apple-id "$APPLE_ID" \
+              --password "$APPLE_APP_SPECIFIC_PASSWORD" \
+              --team-id "$APPLE_TEAM_ID" \
+              --wait || true
+            xcrun stapler staple "$DMG_NAME" || true
+          fi
+
+          # Also create fallback ZIP archive
           cd build/macos/Build/Products/Release
           zip -r -y ../../../../../Mjolnir-macOS.zip Mjolnir.app
 
-      - name: Upload macOS Artifact
+      - name: Upload macOS Artifacts
         uses: actions/upload-artifact@v6
         with:
           name: Mjolnir-macOS
-          path: Mjolnir-macOS.zip
+          path: |
+            Mjolnir-macOS.dmg
+            Mjolnir-macOS.zip
           retention-days: 14
 
   build-android:

@@ -63,6 +63,7 @@ class _SftpDragPayload {
   final String name;
   final bool isDirectory;
   final int? size;
+  final List<_SftpDragPayload>? batchItems;
 
   const _SftpDragPayload({
     required this.source,
@@ -70,7 +71,11 @@ class _SftpDragPayload {
     required this.name,
     required this.isDirectory,
     this.size,
+    this.batchItems,
   });
+
+  List<_SftpDragPayload> get effectiveItems =>
+      (batchItems != null && batchItems!.isNotEmpty) ? batchItems! : [this];
 }
 
 class _LocalFileEntry {
@@ -99,6 +104,7 @@ class SftpTabWidget extends StatefulWidget {
   final VoidCallback? onUnassignTask;
   final ValueChanged<TaskItem>? onAssignedTaskChanged;
   final ValueChanged<String>? onDefaultRemotePathChanged;
+  final String? initialLocalPath;
 
   const SftpTabWidget({
     super.key,
@@ -109,6 +115,7 @@ class SftpTabWidget extends StatefulWidget {
     this.onUnassignTask,
     this.onAssignedTaskChanged,
     this.onDefaultRemotePathChanged,
+    this.initialLocalPath,
   });
 
   @override
@@ -125,6 +132,12 @@ class _SftpTabWidgetState extends State<SftpTabWidget> {
   List<SftpName> _remoteItems = [];
   bool _isExternalDraggingOverRemote = false;
 
+  // Remote multi-select state
+  final Set<String> _selectedRemoteNames = {};
+  int? _lastSelectedRemoteIndex;
+  String? _lastRemoteTapName;
+  DateTime? _lastRemoteTapTime;
+
   // Local file browser state
   bool _showLocalPane = true;
   double _splitRatio = 0.48;
@@ -134,12 +147,34 @@ class _SftpTabWidgetState extends State<SftpTabWidget> {
   List<_LocalFileEntry> _localItems = [];
   bool _isExternalDraggingOverLocal = false;
 
+  // Local multi-select state
+  final Set<String> _selectedLocalPaths = {};
+  int? _lastSelectedLocalIndex;
+  String? _lastLocalTapPath;
+  DateTime? _lastLocalTapTime;
+
+  // Active pane focus for keyboard shortcuts
+  final FocusNode _sftpFocusNode = FocusNode();
+  _DragSource _activePane = _DragSource.local;
+
   // Shared transfer queue & progress state
   int _nextTransferId = 0;
   _TransferJob? _activeTransfer;
   final List<_TransferJob> _transferQueue = [];
   double? _transferProgress;
   String? _transferStatus;
+
+  bool get _isShiftPressed => HardwareKeyboard.instance.isShiftPressed;
+
+  bool get _isCtrlOrMetaPressed =>
+      HardwareKeyboard.instance.isControlPressed ||
+      HardwareKeyboard.instance.isMetaPressed;
+
+  List<_LocalFileEntry> get _selectedLocalEntries =>
+      _localItems.where((e) => _selectedLocalPaths.contains(e.path)).toList();
+
+  List<SftpName> get _selectedRemoteEntries =>
+      _remoteItems.where((e) => _selectedRemoteNames.contains(e.filename)).toList();
 
   @override
   void initState() {
@@ -158,6 +193,9 @@ class _SftpTabWidgetState extends State<SftpTabWidget> {
     });
 
     final candidates = <String>[];
+    if (widget.initialLocalPath != null && widget.initialLocalPath!.trim().isNotEmpty) {
+      candidates.add(widget.initialLocalPath!.trim());
+    }
     final envHome = Platform.environment['HOME'] ?? Platform.environment['USERPROFILE'];
     if (envHome != null && envHome.isNotEmpty) {
       // If running inside a macOS sandbox container path, also check the user's real home/Downloads
@@ -208,9 +246,14 @@ class _SftpTabWidgetState extends State<SftpTabWidget> {
   }
 
   Future<void> _loadLocalDirectory(String path) async {
+    final isSameDirectory = p.equals(path, _currentLocalPath);
     setState(() {
       _isLocalLoading = true;
       _localErrorMessage = null;
+      if (!isSameDirectory) {
+        _selectedLocalPaths.clear();
+        _lastSelectedLocalIndex = null;
+      }
     });
 
     try {
@@ -247,9 +290,15 @@ class _SftpTabWidgetState extends State<SftpTabWidget> {
       });
 
       if (mounted) {
+        final validPaths = entries.map((e) => e.path).toSet();
         setState(() {
           _currentLocalPath = path;
           _localItems = entries;
+          _selectedLocalPaths.retainAll(validPaths);
+          if (_lastSelectedLocalIndex != null &&
+              _lastSelectedLocalIndex! >= entries.length) {
+            _lastSelectedLocalIndex = entries.isEmpty ? null : entries.length - 1;
+          }
           _isLocalLoading = false;
         });
       }
@@ -257,6 +306,8 @@ class _SftpTabWidgetState extends State<SftpTabWidget> {
       if (mounted) {
         setState(() {
           _currentLocalPath = path;
+          _selectedLocalPaths.clear();
+          _lastSelectedLocalIndex = null;
           _isLocalLoading = false;
           _localErrorMessage = 'Cannot access "$path":\n$e';
         });
@@ -306,6 +357,87 @@ class _SftpTabWidgetState extends State<SftpTabWidget> {
     }
   }
 
+  void _selectAllLocal() {
+    setState(() {
+      _selectedLocalPaths
+        ..clear()
+        ..addAll(_localItems.map((e) => e.path));
+    });
+  }
+
+  void _clearLocalSelection() {
+    setState(() {
+      _selectedLocalPaths.clear();
+      _lastSelectedLocalIndex = null;
+    });
+  }
+
+  void _handleLocalRowTap(int index, _LocalFileEntry entry) {
+    _activePane = _DragSource.local;
+    _sftpFocusNode.requestFocus();
+
+    final isShift = _isShiftPressed;
+    final isCtrlOrMeta = _isCtrlOrMetaPressed;
+
+    if (isShift) {
+      _lastLocalTapPath = null;
+      _lastLocalTapTime = null;
+      final anchor = (_lastSelectedLocalIndex != null &&
+              _lastSelectedLocalIndex! >= 0 &&
+              _lastSelectedLocalIndex! < _localItems.length)
+          ? _lastSelectedLocalIndex!
+          : index;
+      final start = anchor < index ? anchor : index;
+      final end = anchor > index ? anchor : index;
+      setState(() {
+        if (!isCtrlOrMeta) {
+          _selectedLocalPaths.clear();
+        }
+        for (var i = start; i <= end; i++) {
+          _selectedLocalPaths.add(_localItems[i].path);
+        }
+        _lastSelectedLocalIndex ??= index;
+      });
+      return;
+    }
+
+    if (isCtrlOrMeta) {
+      _lastLocalTapPath = null;
+      _lastLocalTapTime = null;
+      setState(() {
+        if (_selectedLocalPaths.contains(entry.path)) {
+          _selectedLocalPaths.remove(entry.path);
+        } else {
+          _selectedLocalPaths.add(entry.path);
+        }
+        _lastSelectedLocalIndex = index;
+      });
+      return;
+    }
+
+    final now = DateTime.now();
+    final isTouchPlatform = Platform.isAndroid || Platform.isIOS;
+    final isDoubleTap = _lastLocalTapPath == entry.path &&
+        _lastLocalTapTime != null &&
+        now.difference(_lastLocalTapTime!) <= const Duration(milliseconds: 400);
+
+    if (entry.isDirectory && (isDoubleTap || isTouchPlatform)) {
+      _lastLocalTapPath = null;
+      _lastLocalTapTime = null;
+      _loadLocalDirectory(entry.path);
+      return;
+    }
+
+    _lastLocalTapPath = entry.path;
+    _lastLocalTapTime = now;
+    setState(() {
+      _selectedLocalPaths
+        ..clear()
+        ..add(entry.path);
+      _lastSelectedLocalIndex = index;
+    });
+  }
+
   Future<void> _deleteLocalEntry(_LocalFileEntry entry) async {
     final isDir = entry.isDirectory;
     final confirm = await showDialog<bool>(
@@ -335,6 +467,7 @@ class _SftpTabWidgetState extends State<SftpTabWidget> {
 
     try {
       await entry.entity.delete(recursive: true);
+      _selectedLocalPaths.remove(entry.path);
       if (mounted) {
         AppNotification.show(
           context,
@@ -354,6 +487,67 @@ class _SftpTabWidgetState extends State<SftpTabWidget> {
         );
       }
     }
+  }
+
+  Future<void> _deleteSelectedLocalEntries() async {
+    final selected = _selectedLocalEntries;
+    if (selected.isEmpty) return;
+    if (selected.length == 1) {
+      await _deleteLocalEntry(selected.first);
+      return;
+    }
+
+    final confirm = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: Text('Delete ${selected.length} Local Items'),
+        content: Text(
+          'Are you sure you want to delete ${selected.length} selected local items?\n\n'
+          '${selected.take(5).map((e) => '• ${e.name}').join('\n')}'
+          '${selected.length > 5 ? '\n...and ${selected.length - 5} more' : ''}',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(false),
+            child: const Text('Cancel'),
+          ),
+          ElevatedButton(
+            style: ElevatedButton.styleFrom(backgroundColor: Colors.red),
+            onPressed: () => Navigator.of(ctx).pop(true),
+            child: Text('Delete ${selected.length} Items'),
+          ),
+        ],
+      ),
+    );
+
+    if (confirm != true) return;
+
+    var deletedCount = 0;
+    String? lastError;
+    for (final entry in selected) {
+      try {
+        await entry.entity.delete(recursive: true);
+        _selectedLocalPaths.remove(entry.path);
+        deletedCount++;
+      } catch (e) {
+        lastError = e.toString();
+      }
+    }
+
+    if (mounted) {
+      if (lastError != null) {
+        AppNotification.error(
+          context,
+          'Deleted $deletedCount/${selected.length} items. Last error: $lastError',
+        );
+      } else {
+        AppNotification.show(
+          context,
+          message: 'Deleted $deletedCount local items',
+        );
+      }
+    }
+    await _loadLocalDirectory(_currentLocalPath);
   }
 
   Future<void> _renameLocalEntry(_LocalFileEntry entry) async {
@@ -532,9 +726,14 @@ class _SftpTabWidgetState extends State<SftpTabWidget> {
       path,
       homePath: _remoteHomePath,
     );
+    final isSameDirectory = resolvedPath == _currentRemotePath;
     setState(() {
       _isRemoteLoading = true;
       _remoteErrorMessage = null;
+      if (!isSameDirectory) {
+        _selectedRemoteNames.clear();
+        _lastSelectedRemoteIndex = null;
+      }
     });
 
     try {
@@ -552,9 +751,15 @@ class _SftpTabWidgetState extends State<SftpTabWidget> {
       });
 
       if (mounted) {
+        final validNames = items.map((e) => e.filename).toSet();
         setState(() {
           _currentRemotePath = resolvedPath;
           _remoteItems = items;
+          _selectedRemoteNames.retainAll(validNames);
+          if (_lastSelectedRemoteIndex != null &&
+              _lastSelectedRemoteIndex! >= items.length) {
+            _lastSelectedRemoteIndex = items.isEmpty ? null : items.length - 1;
+          }
           _isRemoteLoading = false;
         });
       }
@@ -562,11 +767,95 @@ class _SftpTabWidgetState extends State<SftpTabWidget> {
       if (mounted) {
         setState(() {
           _currentRemotePath = resolvedPath;
+          _selectedRemoteNames.clear();
+          _lastSelectedRemoteIndex = null;
           _isRemoteLoading = false;
           _remoteErrorMessage = 'Failed to list directory "$resolvedPath": $e';
         });
       }
     }
+  }
+
+  void _selectAllRemote() {
+    setState(() {
+      _selectedRemoteNames
+        ..clear()
+        ..addAll(_remoteItems.map((e) => e.filename));
+    });
+  }
+
+  void _clearRemoteSelection() {
+    setState(() {
+      _selectedRemoteNames.clear();
+      _lastSelectedRemoteIndex = null;
+    });
+  }
+
+  void _handleRemoteRowTap(int index, SftpName item) {
+    _activePane = _DragSource.remote;
+    _sftpFocusNode.requestFocus();
+
+    final isShift = _isShiftPressed;
+    final isCtrlOrMeta = _isCtrlOrMetaPressed;
+
+    if (isShift) {
+      _lastRemoteTapName = null;
+      _lastRemoteTapTime = null;
+      final anchor = (_lastSelectedRemoteIndex != null &&
+              _lastSelectedRemoteIndex! >= 0 &&
+              _lastSelectedRemoteIndex! < _remoteItems.length)
+          ? _lastSelectedRemoteIndex!
+          : index;
+      final start = anchor < index ? anchor : index;
+      final end = anchor > index ? anchor : index;
+      setState(() {
+        if (!isCtrlOrMeta) {
+          _selectedRemoteNames.clear();
+        }
+        for (var i = start; i <= end; i++) {
+          _selectedRemoteNames.add(_remoteItems[i].filename);
+        }
+        _lastSelectedRemoteIndex ??= index;
+      });
+      return;
+    }
+
+    if (isCtrlOrMeta) {
+      _lastRemoteTapName = null;
+      _lastRemoteTapTime = null;
+      setState(() {
+        if (_selectedRemoteNames.contains(item.filename)) {
+          _selectedRemoteNames.remove(item.filename);
+        } else {
+          _selectedRemoteNames.add(item.filename);
+        }
+        _lastSelectedRemoteIndex = index;
+      });
+      return;
+    }
+
+    final now = DateTime.now();
+    final isTouchPlatform = Platform.isAndroid || Platform.isIOS;
+    final isDoubleTap = _lastRemoteTapName == item.filename &&
+        _lastRemoteTapTime != null &&
+        now.difference(_lastRemoteTapTime!) <= const Duration(milliseconds: 400);
+
+    if (item.attr.isDirectory && (isDoubleTap || isTouchPlatform)) {
+      _lastRemoteTapName = null;
+      _lastRemoteTapTime = null;
+      final remoteItemPath = p.posix.join(_currentRemotePath, item.filename);
+      _loadRemoteDirectory(remoteItemPath);
+      return;
+    }
+
+    _lastRemoteTapName = item.filename;
+    _lastRemoteTapTime = now;
+    setState(() {
+      _selectedRemoteNames
+        ..clear()
+        ..add(item.filename);
+      _lastSelectedRemoteIndex = index;
+    });
   }
 
   Future<void> _navigateRemoteUp() async {
@@ -743,6 +1032,14 @@ class _SftpTabWidgetState extends State<SftpTabWidget> {
     _processTransferQueue();
   }
 
+  void _uploadSelectedLocalItems({String? targetRemoteDir}) {
+    final selected = _selectedLocalEntries;
+    if (selected.isEmpty) return;
+    for (final entry in selected) {
+      _enqueueUpload(entry.path, targetRemoteDir: targetRemoteDir);
+    }
+  }
+
   Future<void> _enqueueDownloadToLocal({
     required String remotePath,
     required String name,
@@ -772,6 +1069,67 @@ class _SftpTabWidgetState extends State<SftpTabWidget> {
       });
     }
     _processTransferQueue();
+  }
+
+  Future<void> _enqueueBatchDownloadToLocal(
+    List<_SftpDragPayload> items, {
+    String? targetLocalDir,
+  }) async {
+    if (_sftpSession == null || items.isEmpty) return;
+    var destDir = targetLocalDir ?? _currentLocalPath;
+    if (destDir.isEmpty) {
+      await _pickLocalDirectory();
+      if (_currentLocalPath.isEmpty) return;
+      destDir = _currentLocalPath;
+    }
+    if (!mounted) return;
+    setState(() {
+      for (final item in items) {
+        _transferQueue.add(
+          _TransferJob(
+            id: ++_nextTransferId,
+            type: _TransferType.downloadToLocal,
+            name: item.name,
+            sourcePath: item.path,
+            targetDir: destDir,
+            isDirectory: item.isDirectory,
+            size: item.size,
+          ),
+        );
+      }
+    });
+    _processTransferQueue();
+  }
+
+  Future<void> _downloadSelectedRemoteItems({String? targetLocalDir}) async {
+    final selected = _selectedRemoteEntries;
+    if (selected.isEmpty || _sftpSession == null) return;
+
+    if (!_showLocalPane &&
+        targetLocalDir == null &&
+        _currentLocalPath.isEmpty &&
+        selected.length == 1 &&
+        !selected.first.attr.isDirectory) {
+      _enqueueDownloadSaveAs(selected.first);
+      return;
+    }
+
+    final payloads = selected
+        .map(
+          (item) => _SftpDragPayload(
+            source: _DragSource.remote,
+            path: p.posix.join(_currentRemotePath, item.filename),
+            name: item.filename,
+            isDirectory: item.attr.isDirectory,
+            size: item.attr.size,
+          ),
+        )
+        .toList();
+
+    await _enqueueBatchDownloadToLocal(
+      payloads,
+      targetLocalDir: targetLocalDir,
+    );
   }
 
   void _enqueueDownloadSaveAs(SftpName item) {
@@ -1208,9 +1566,13 @@ class _SftpTabWidgetState extends State<SftpTabWidget> {
   Future<void> _uploadFileViaPicker() async {
     if (_sftpSession == null) return;
     final result = await FilePicker.pickFiles();
-    if (result.isEmpty || result.first.path == null) return;
+    if (result.isEmpty) return;
 
-    _enqueueUpload(result.first.path!);
+    for (final file in result) {
+      if (file.path != null && file.path!.isNotEmpty) {
+        _enqueueUpload(file.path!);
+      }
+    }
   }
 
   Future<void> _removeRemoteDirectoryRecursive(String dirPath) async {
@@ -1264,6 +1626,7 @@ class _SftpTabWidgetState extends State<SftpTabWidget> {
       } else {
         await _sftpSession!.sftp.remove(remoteTarget);
       }
+      _selectedRemoteNames.remove(item.filename);
       if (mounted) {
         AppNotification.show(
           context,
@@ -1283,6 +1646,73 @@ class _SftpTabWidgetState extends State<SftpTabWidget> {
         );
       }
     }
+  }
+
+  Future<void> _deleteSelectedRemoteItems() async {
+    if (_sftpSession == null) return;
+    final selected = _selectedRemoteEntries;
+    if (selected.isEmpty) return;
+    if (selected.length == 1) {
+      await _deleteRemoteFile(selected.first);
+      return;
+    }
+
+    final confirm = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: Text('Delete ${selected.length} Remote Items'),
+        content: Text(
+          'Are you sure you want to delete ${selected.length} selected remote items from the server?\n\n'
+          '${selected.take(5).map((e) => '• ${e.filename}').join('\n')}'
+          '${selected.length > 5 ? '\n...and ${selected.length - 5} more' : ''}',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(false),
+            child: const Text('Cancel'),
+          ),
+          ElevatedButton(
+            style: ElevatedButton.styleFrom(backgroundColor: Colors.red),
+            onPressed: () => Navigator.of(ctx).pop(true),
+            child: Text('Delete ${selected.length} Items'),
+          ),
+        ],
+      ),
+    );
+
+    if (confirm != true) return;
+
+    var deletedCount = 0;
+    String? lastError;
+    for (final item in selected) {
+      final remoteTarget = p.posix.join(_currentRemotePath, item.filename);
+      try {
+        if (item.attr.isDirectory) {
+          await _removeRemoteDirectoryRecursive(remoteTarget);
+        } else {
+          await _sftpSession!.sftp.remove(remoteTarget);
+        }
+        _selectedRemoteNames.remove(item.filename);
+        deletedCount++;
+      } catch (e) {
+        lastError = e.toString();
+      }
+    }
+
+    if (mounted) {
+      if (lastError != null) {
+        AppNotification.error(
+          context,
+          'Deleted $deletedCount/${selected.length} remote items. Last error: $lastError',
+        );
+      } else {
+        AppNotification.show(
+          context,
+          message: 'Deleted $deletedCount remote items',
+        );
+      }
+    }
+    await _loadRemoteDirectory(_currentRemotePath);
   }
 
   Future<void> _renameRemoteEntry(SftpName item) async {
@@ -1573,6 +2003,7 @@ class _SftpTabWidgetState extends State<SftpTabWidget> {
   }
 
   void _showLocalPaneContextMenu(BuildContext context, Offset globalPos) {
+    _activePane = _DragSource.local;
     final overlay = Overlay.of(context).context.findRenderObject() as RenderBox;
 
     showMenu<String>(
@@ -1582,6 +2013,30 @@ class _SftpTabWidgetState extends State<SftpTabWidget> {
         Offset.zero & overlay.size,
       ),
       items: [
+        if (_localItems.isNotEmpty) ...[
+          const PopupMenuItem(
+            value: 'select_all',
+            child: Row(
+              children: [
+                Icon(Icons.select_all, size: 16),
+                SizedBox(width: 8),
+                Text('Select All'),
+              ],
+            ),
+          ),
+          if (_selectedLocalPaths.isNotEmpty)
+            const PopupMenuItem(
+              value: 'clear_selection',
+              child: Row(
+                children: [
+                  Icon(Icons.deselect, size: 16),
+                  SizedBox(width: 8),
+                  Text('Clear Selection'),
+                ],
+              ),
+            ),
+          const PopupMenuDivider(),
+        ],
         if (_currentLocalPath.isNotEmpty) ...[
           const PopupMenuItem(
             value: 'mkdir',
@@ -1637,6 +2092,8 @@ class _SftpTabWidgetState extends State<SftpTabWidget> {
         ),
       ],
     ).then((choice) {
+      if (choice == 'select_all') _selectAllLocal();
+      if (choice == 'clear_selection') _clearLocalSelection();
       if (choice == 'mkdir') _createLocalFolder();
       if (choice == 'rmdir') _promptAndRemoveLocalDirectory(isDirectory: true);
       if (choice == 'delete_file') _promptAndRemoveLocalDirectory(isDirectory: false);
@@ -1653,6 +2110,7 @@ class _SftpTabWidgetState extends State<SftpTabWidget> {
 
   void _showRemotePaneContextMenu(BuildContext context, Offset globalPos) {
     if (_sftpSession == null) return;
+    _activePane = _DragSource.remote;
     final overlay = Overlay.of(context).context.findRenderObject() as RenderBox;
 
     showMenu<String>(
@@ -1662,6 +2120,30 @@ class _SftpTabWidgetState extends State<SftpTabWidget> {
         Offset.zero & overlay.size,
       ),
       items: [
+        if (_remoteItems.isNotEmpty) ...[
+          const PopupMenuItem(
+            value: 'select_all',
+            child: Row(
+              children: [
+                Icon(Icons.select_all, size: 16),
+                SizedBox(width: 8),
+                Text('Select All'),
+              ],
+            ),
+          ),
+          if (_selectedRemoteNames.isNotEmpty)
+            const PopupMenuItem(
+              value: 'clear_selection',
+              child: Row(
+                children: [
+                  Icon(Icons.deselect, size: 16),
+                  SizedBox(width: 8),
+                  Text('Clear Selection'),
+                ],
+              ),
+            ),
+          const PopupMenuDivider(),
+        ],
         const PopupMenuItem(
           value: 'mkdir',
           child: Row(
@@ -1715,6 +2197,8 @@ class _SftpTabWidgetState extends State<SftpTabWidget> {
         ),
       ],
     ).then((choice) {
+      if (choice == 'select_all') _selectAllRemote();
+      if (choice == 'clear_selection') _clearRemoteSelection();
       if (choice == 'mkdir') _createRemoteFolder();
       if (choice == 'rmdir') _promptAndRemoveRemoteItem(isDirectory: true);
       if (choice == 'delete_file') _promptAndRemoveRemoteItem(isDirectory: false);
@@ -1724,6 +2208,19 @@ class _SftpTabWidgetState extends State<SftpTabWidget> {
   }
 
   void _showLocalContextMenu(BuildContext context, Offset globalPos, _LocalFileEntry entry) {
+    _activePane = _DragSource.local;
+    _sftpFocusNode.requestFocus();
+    if (!_selectedLocalPaths.contains(entry.path)) {
+      setState(() {
+        _selectedLocalPaths
+          ..clear()
+          ..add(entry.path);
+        _lastSelectedLocalIndex = _localItems.indexOf(entry);
+      });
+    }
+
+    final selectedCount = _selectedLocalPaths.length;
+    final isMultiSelected = selectedCount > 1;
     final overlay = Overlay.of(context).context.findRenderObject() as RenderBox;
 
     showMenu<String>(
@@ -1733,38 +2230,66 @@ class _SftpTabWidgetState extends State<SftpTabWidget> {
         Offset.zero & overlay.size,
       ),
       items: [
-        if (entry.isDirectory)
-          const PopupMenuItem(
-            value: 'open_dir',
-            child: Row(
-              children: [
-                Icon(Icons.folder_open, size: 16),
-                SizedBox(width: 8),
-                Text('Open Directory'),
-              ],
+        if (!isMultiSelected) ...[
+          if (entry.isDirectory)
+            const PopupMenuItem(
+              value: 'open_dir',
+              child: Row(
+                children: [
+                  Icon(Icons.folder_open, size: 16),
+                  SizedBox(width: 8),
+                  Text('Open Directory'),
+                ],
+              ),
+            )
+          else
+            const PopupMenuItem(
+              value: 'open_editor',
+              child: Row(
+                children: [
+                  Icon(Icons.open_in_new, size: 16),
+                  SizedBox(width: 8),
+                  Text('Open in External Text Editor'),
+                ],
+              ),
             ),
-          )
-        else
-          const PopupMenuItem(
-            value: 'open_editor',
-            child: Row(
-              children: [
-                Icon(Icons.open_in_new, size: 16),
-                SizedBox(width: 8),
-                Text('Open in External Text Editor'),
-              ],
-            ),
-          ),
+        ],
         PopupMenuItem(
           value: 'upload',
           child: Row(
             children: [
               const Icon(Icons.upload, size: 16),
               const SizedBox(width: 8),
-              Text(entry.isDirectory ? 'Upload Directory to Remote' : 'Upload File to Remote'),
+              Text(
+                isMultiSelected
+                    ? 'Upload $selectedCount Selected Items to Remote'
+                    : (entry.isDirectory ? 'Upload Directory to Remote' : 'Upload File to Remote'),
+              ),
             ],
           ),
         ),
+        const PopupMenuDivider(),
+        const PopupMenuItem(
+          value: 'select_all',
+          child: Row(
+            children: [
+              Icon(Icons.select_all, size: 16),
+              SizedBox(width: 8),
+              Text('Select All'),
+            ],
+          ),
+        ),
+        if (selectedCount > 0)
+          const PopupMenuItem(
+            value: 'clear_selection',
+            child: Row(
+              children: [
+                Icon(Icons.deselect, size: 16),
+                SizedBox(width: 8),
+                Text('Clear Selection'),
+              ],
+            ),
+          ),
         const PopupMenuDivider(),
         const PopupMenuItem(
           value: 'mkdir',
@@ -1776,28 +2301,33 @@ class _SftpTabWidgetState extends State<SftpTabWidget> {
             ],
           ),
         ),
-        PopupMenuItem(
-          value: 'rename',
-          child: Row(
-            children: [
-              const Icon(Icons.drive_file_rename_outline, size: 16),
-              const SizedBox(width: 8),
-              Text(entry.isDirectory ? 'Rename Directory...' : 'Rename File...'),
-            ],
+        if (!isMultiSelected)
+          PopupMenuItem(
+            value: 'rename',
+            child: Row(
+              children: [
+                const Icon(Icons.drive_file_rename_outline, size: 16),
+                const SizedBox(width: 8),
+                Text(entry.isDirectory ? 'Rename Directory...' : 'Rename File...'),
+              ],
+            ),
           ),
-        ),
         PopupMenuItem(
           value: 'delete',
           child: Row(
             children: [
               Icon(
-                entry.isDirectory ? Icons.folder_delete_outlined : Icons.delete_outline,
+                !isMultiSelected && entry.isDirectory
+                    ? Icons.folder_delete_outlined
+                    : Icons.delete_outline,
                 size: 16,
                 color: Colors.redAccent,
               ),
               const SizedBox(width: 8),
               Text(
-                entry.isDirectory ? 'Remove Directory' : 'Delete File',
+                isMultiSelected
+                    ? 'Delete $selectedCount Selected Items'
+                    : (entry.isDirectory ? 'Remove Directory' : 'Delete File'),
                 style: const TextStyle(color: Colors.redAccent),
               ),
             ],
@@ -1807,14 +2337,41 @@ class _SftpTabWidgetState extends State<SftpTabWidget> {
     ).then((choice) {
       if (choice == 'open_dir') _loadLocalDirectory(entry.path);
       if (choice == 'open_editor') _openLocalFileInExternalEditor(entry.path);
-      if (choice == 'upload') _enqueueUpload(entry.path);
+      if (choice == 'upload') {
+        if (isMultiSelected) {
+          _uploadSelectedLocalItems();
+        } else {
+          _enqueueUpload(entry.path);
+        }
+      }
+      if (choice == 'select_all') _selectAllLocal();
+      if (choice == 'clear_selection') _clearLocalSelection();
       if (choice == 'mkdir') _createLocalFolder();
       if (choice == 'rename') _renameLocalEntry(entry);
-      if (choice == 'delete') _deleteLocalEntry(entry);
+      if (choice == 'delete') {
+        if (isMultiSelected) {
+          _deleteSelectedLocalEntries();
+        } else {
+          _deleteLocalEntry(entry);
+        }
+      }
     });
   }
 
   void _showRemoteContextMenu(BuildContext context, Offset globalPos, SftpName item) {
+    _activePane = _DragSource.remote;
+    _sftpFocusNode.requestFocus();
+    if (!_selectedRemoteNames.contains(item.filename)) {
+      setState(() {
+        _selectedRemoteNames
+          ..clear()
+          ..add(item.filename);
+        _lastSelectedRemoteIndex = _remoteItems.indexOf(item);
+      });
+    }
+
+    final selectedCount = _selectedRemoteNames.length;
+    final isMultiSelected = selectedCount > 1;
     final isDir = item.attr.isDirectory;
     final overlay = Overlay.of(context).context.findRenderObject() as RenderBox;
     final remotePath = p.posix.join(_currentRemotePath, item.filename);
@@ -1826,39 +2383,45 @@ class _SftpTabWidgetState extends State<SftpTabWidget> {
         Offset.zero & overlay.size,
       ),
       items: [
-        if (isDir)
-          const PopupMenuItem(
-            value: 'open_dir',
-            child: Row(
-              children: [
-                Icon(Icons.folder_open, size: 16),
-                SizedBox(width: 8),
-                Text('Open Directory'),
-              ],
+        if (!isMultiSelected) ...[
+          if (isDir)
+            const PopupMenuItem(
+              value: 'open_dir',
+              child: Row(
+                children: [
+                  Icon(Icons.folder_open, size: 16),
+                  SizedBox(width: 8),
+                  Text('Open Directory'),
+                ],
+              ),
+            )
+          else
+            const PopupMenuItem(
+              value: 'open_editor',
+              child: Row(
+                children: [
+                  Icon(Icons.open_in_new, size: 16),
+                  SizedBox(width: 8),
+                  Text('Open in External Text Editor'),
+                ],
+              ),
             ),
-          )
-        else
-          const PopupMenuItem(
-            value: 'open_editor',
-            child: Row(
-              children: [
-                Icon(Icons.open_in_new, size: 16),
-                SizedBox(width: 8),
-                Text('Open in External Text Editor'),
-              ],
-            ),
-          ),
+        ],
         PopupMenuItem(
           value: 'download_local_pane',
           child: Row(
             children: [
               const Icon(Icons.west, size: 16),
               const SizedBox(width: 8),
-              Text(isDir ? 'Download Directory to Local Pane' : 'Download File to Local Pane'),
+              Text(
+                isMultiSelected
+                    ? 'Download $selectedCount Selected Items to Local Pane'
+                    : (isDir ? 'Download Directory to Local Pane' : 'Download File to Local Pane'),
+              ),
             ],
           ),
         ),
-        if (!isDir)
+        if (!isMultiSelected && !isDir)
           const PopupMenuItem(
             value: 'save_as',
             child: Row(
@@ -1871,6 +2434,28 @@ class _SftpTabWidgetState extends State<SftpTabWidget> {
           ),
         const PopupMenuDivider(),
         const PopupMenuItem(
+          value: 'select_all',
+          child: Row(
+            children: [
+              Icon(Icons.select_all, size: 16),
+              SizedBox(width: 8),
+              Text('Select All'),
+            ],
+          ),
+        ),
+        if (selectedCount > 0)
+          const PopupMenuItem(
+            value: 'clear_selection',
+            child: Row(
+              children: [
+                Icon(Icons.deselect, size: 16),
+                SizedBox(width: 8),
+                Text('Clear Selection'),
+              ],
+            ),
+          ),
+        const PopupMenuDivider(),
+        const PopupMenuItem(
           value: 'mkdir',
           child: Row(
             children: [
@@ -1880,28 +2465,33 @@ class _SftpTabWidgetState extends State<SftpTabWidget> {
             ],
           ),
         ),
-        PopupMenuItem(
-          value: 'rename',
-          child: Row(
-            children: [
-              const Icon(Icons.drive_file_rename_outline, size: 16),
-              const SizedBox(width: 8),
-              Text(isDir ? 'Rename Directory...' : 'Rename File...'),
-            ],
+        if (!isMultiSelected)
+          PopupMenuItem(
+            value: 'rename',
+            child: Row(
+              children: [
+                const Icon(Icons.drive_file_rename_outline, size: 16),
+                const SizedBox(width: 8),
+                Text(isDir ? 'Rename Directory...' : 'Rename File...'),
+              ],
+            ),
           ),
-        ),
         PopupMenuItem(
           value: 'delete',
           child: Row(
             children: [
               Icon(
-                isDir ? Icons.folder_delete_outlined : Icons.delete_outline,
+                !isMultiSelected && isDir
+                    ? Icons.folder_delete_outlined
+                    : Icons.delete_outline,
                 size: 16,
                 color: Colors.redAccent,
               ),
               const SizedBox(width: 8),
               Text(
-                isDir ? 'Remove Directory' : 'Delete File',
+                isMultiSelected
+                    ? 'Delete $selectedCount Selected Items'
+                    : (isDir ? 'Remove Directory' : 'Delete File'),
                 style: const TextStyle(color: Colors.redAccent),
               ),
             ],
@@ -1912,22 +2502,79 @@ class _SftpTabWidgetState extends State<SftpTabWidget> {
       if (choice == 'open_dir') _loadRemoteDirectory(remotePath);
       if (choice == 'open_editor') _enqueueDownloadAndOpenExternal(item);
       if (choice == 'download_local_pane') {
-        _enqueueDownloadToLocal(
-          remotePath: remotePath,
-          name: item.filename,
-          isDirectory: isDir,
-          size: item.attr.size,
-        );
+        if (isMultiSelected) {
+          _downloadSelectedRemoteItems();
+        } else {
+          _enqueueDownloadToLocal(
+            remotePath: remotePath,
+            name: item.filename,
+            isDirectory: isDir,
+            size: item.attr.size,
+          );
+        }
       }
       if (choice == 'save_as') _enqueueDownloadSaveAs(item);
+      if (choice == 'select_all') _selectAllRemote();
+      if (choice == 'clear_selection') _clearRemoteSelection();
       if (choice == 'mkdir') _createRemoteFolder();
       if (choice == 'rename') _renameRemoteEntry(item);
-      if (choice == 'delete') _deleteRemoteFile(item);
+      if (choice == 'delete') {
+        if (isMultiSelected) {
+          _deleteSelectedRemoteItems();
+        } else {
+          _deleteRemoteFile(item);
+        }
+      }
     });
+  }
+
+  KeyEventResult _handleKeyEvent(FocusNode node, KeyEvent event) {
+    if (event is! KeyDownEvent) return KeyEventResult.ignored;
+    if (FocusManager.instance.primaryFocus != _sftpFocusNode) {
+      return KeyEventResult.ignored;
+    }
+
+    if (_isCtrlOrMetaPressed && event.logicalKey == LogicalKeyboardKey.keyA) {
+      if (_activePane == _DragSource.local && _showLocalPane) {
+        _selectAllLocal();
+      } else {
+        _selectAllRemote();
+      }
+      return KeyEventResult.handled;
+    }
+
+    if (event.logicalKey == LogicalKeyboardKey.escape) {
+      if (_selectedLocalPaths.isNotEmpty || _selectedRemoteNames.isNotEmpty) {
+        setState(() {
+          _selectedLocalPaths.clear();
+          _lastSelectedLocalIndex = null;
+          _selectedRemoteNames.clear();
+          _lastSelectedRemoteIndex = null;
+        });
+        return KeyEventResult.handled;
+      }
+    }
+
+    if (event.logicalKey == LogicalKeyboardKey.delete ||
+        event.logicalKey == LogicalKeyboardKey.backspace) {
+      if (_activePane == _DragSource.local &&
+          _showLocalPane &&
+          _selectedLocalPaths.isNotEmpty) {
+        _deleteSelectedLocalEntries();
+        return KeyEventResult.handled;
+      } else if (_activePane == _DragSource.remote &&
+          _selectedRemoteNames.isNotEmpty) {
+        _deleteSelectedRemoteItems();
+        return KeyEventResult.handled;
+      }
+    }
+
+    return KeyEventResult.ignored;
   }
 
   @override
   void dispose() {
+    _sftpFocusNode.dispose();
     _activeTransfer?.isCancelled = true;
     for (final job in _transferQueue) {
       job.isCancelled = true;
@@ -1935,6 +2582,103 @@ class _SftpTabWidgetState extends State<SftpTabWidget> {
     _transferQueue.clear();
     _sftpSession?.close();
     super.dispose();
+  }
+
+  Widget _buildSelectionBar({
+    required BuildContext context,
+    required int selectedCount,
+    required int totalCount,
+    required VoidCallback onSelectAll,
+    required VoidCallback onClear,
+    required String transferLabel,
+    required IconData transferIcon,
+    required VoidCallback? onTransfer,
+    required VoidCallback? onDelete,
+  }) {
+    final colorScheme = Theme.of(context).colorScheme;
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+      decoration: BoxDecoration(
+        color: colorScheme.primary.withAlpha(30),
+        border: Border(
+          bottom: BorderSide(
+            color: colorScheme.primary.withAlpha(70),
+            width: 1,
+          ),
+        ),
+      ),
+      child: Wrap(
+        alignment: WrapAlignment.spaceBetween,
+        crossAxisAlignment: WrapCrossAlignment.center,
+        spacing: 6,
+        runSpacing: 4,
+        children: [
+          Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(Icons.check_circle_outline, size: 15, color: colorScheme.primary),
+              const SizedBox(width: 6),
+              Text(
+                '$selectedCount selected',
+                style: TextStyle(
+                  fontSize: 12,
+                  fontWeight: FontWeight.w600,
+                  color: colorScheme.onSurface,
+                ),
+              ),
+            ],
+          ),
+          Wrap(
+            crossAxisAlignment: WrapCrossAlignment.center,
+            spacing: 4,
+            runSpacing: 2,
+            children: [
+              if (selectedCount < totalCount)
+                TextButton(
+                  style: TextButton.styleFrom(
+                    visualDensity: VisualDensity.compact,
+                    minimumSize: Size.zero,
+                    tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                    padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 4),
+                  ),
+                  onPressed: onSelectAll,
+                  child: const Text('Select All', style: TextStyle(fontSize: 11)),
+                ),
+              TextButton(
+                style: TextButton.styleFrom(
+                  visualDensity: VisualDensity.compact,
+                  minimumSize: Size.zero,
+                  tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                  padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 4),
+                ),
+                onPressed: onClear,
+                child: const Text('Clear', style: TextStyle(fontSize: 11)),
+              ),
+              TextButton.icon(
+                style: TextButton.styleFrom(
+                  visualDensity: VisualDensity.compact,
+                  minimumSize: Size.zero,
+                  tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                  padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                ),
+                icon: Icon(transferIcon, size: 14),
+                label: Text(transferLabel, style: const TextStyle(fontSize: 11)),
+                onPressed: onTransfer,
+              ),
+              IconButton(
+                icon: const Icon(Icons.delete_outline, size: 16, color: Colors.redAccent),
+                tooltip: 'Delete Selected ($selectedCount)',
+                visualDensity: VisualDensity.compact,
+                constraints: const BoxConstraints(),
+                padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                onPressed: onDelete,
+              ),
+            ],
+          ),
+        ],
+      ),
+    );
   }
 
   Widget _buildLocalPane(BuildContext context) {
@@ -2006,6 +2750,19 @@ class _SftpTabWidgetState extends State<SftpTabWidget> {
           ),
         ),
 
+        if (_selectedLocalPaths.isNotEmpty)
+          _buildSelectionBar(
+            context: context,
+            selectedCount: _selectedLocalPaths.length,
+            totalCount: _localItems.length,
+            onSelectAll: _selectAllLocal,
+            onClear: _clearLocalSelection,
+            transferLabel: 'Upload (${_selectedLocalPaths.length})',
+            transferIcon: Icons.east,
+            onTransfer: _sftpSession != null ? _uploadSelectedLocalItems : null,
+            onDelete: _deleteSelectedLocalEntries,
+          ),
+
         // Local File List + DragTarget for Remote -> Local drops
         Expanded(
           child: DropTarget(
@@ -2025,13 +2782,7 @@ class _SftpTabWidgetState extends State<SftpTabWidget> {
               onWillAcceptWithDetails: (details) =>
                   details.data.source == _DragSource.remote,
               onAcceptWithDetails: (details) {
-                final payload = details.data;
-                _enqueueDownloadToLocal(
-                  remotePath: payload.path,
-                  name: payload.name,
-                  isDirectory: payload.isDirectory,
-                  size: payload.size,
-                );
+                _enqueueBatchDownloadToLocal(details.data.effectiveItems);
               },
               builder: (context, candidateData, rejectedData) {
                 final isHighlighted =
@@ -2039,6 +2790,13 @@ class _SftpTabWidgetState extends State<SftpTabWidget> {
 
                 return GestureDetector(
                   behavior: HitTestBehavior.translucent,
+                  onTap: () {
+                    _activePane = _DragSource.local;
+                    _sftpFocusNode.requestFocus();
+                    if (_selectedLocalPaths.isNotEmpty) {
+                      _clearLocalSelection();
+                    }
+                  },
                   onSecondaryTapUp: (details) =>
                       _showLocalPaneContextMenu(context, details.globalPosition),
                   onLongPressStart: (details) =>
@@ -2101,54 +2859,85 @@ class _SftpTabWidgetState extends State<SftpTabWidget> {
                               ],
                             ),
                           )
-                      else
-                        ListView.builder(
-                          itemCount: _localItems.length,
-                          itemBuilder: (context, index) {
-                            final entry = _localItems[index];
-                            final payload = _SftpDragPayload(
-                              source: _DragSource.local,
-                              path: entry.path,
-                              name: entry.name,
-                              isDirectory: entry.isDirectory,
-                              size: entry.size,
-                            );
+                        else
+                          ListView.builder(
+                            itemCount: _localItems.length,
+                            itemBuilder: (context, index) {
+                              final entry = _localItems[index];
+                              final isSelected = _selectedLocalPaths.contains(entry.path);
+                              final isPartOfMultiSelection =
+                                  isSelected && _selectedLocalPaths.length > 1;
+                              final batchPayloads = isPartOfMultiSelection
+                                  ? _selectedLocalEntries
+                                      .map(
+                                        (e) => _SftpDragPayload(
+                                          source: _DragSource.local,
+                                          path: e.path,
+                                          name: e.name,
+                                          isDirectory: e.isDirectory,
+                                          size: e.size,
+                                        ),
+                                      )
+                                      .toList()
+                                  : null;
 
-                            return _DraggableTransferRow(
-                              payload: payload,
-                              acceptsDropFrom: entry.isDirectory ? _DragSource.remote : null,
-                              onAcceptDrop: entry.isDirectory
-                                  ? (incoming) {
-                                      _enqueueDownloadToLocal(
-                                        remotePath: incoming.path,
-                                        name: incoming.name,
-                                        isDirectory: incoming.isDirectory,
-                                        size: incoming.size,
-                                        targetLocalDir: entry.path,
-                                      );
-                                    }
-                                  : null,
-                              child: HoverableFileRow(
+                              final payload = _SftpDragPayload(
+                                source: _DragSource.local,
+                                path: entry.path,
                                 name: entry.name,
-                                subtitle: entry.isDirectory
-                                    ? 'Folder'
-                                    : '${_formatBytes(entry.size)} • ${_formatDate(entry.modified)}',
-                                isDir: entry.isDirectory,
-                                primaryActionIcon: Icons.east,
-                                primaryActionTooltip: entry.isDirectory
-                                    ? 'Upload folder to remote'
-                                    : 'Upload to remote',
-                                onTap: entry.isDirectory
-                                    ? () => _loadLocalDirectory(entry.path)
+                                isDirectory: entry.isDirectory,
+                                size: entry.size,
+                                batchItems: batchPayloads,
+                              );
+
+                              return _DraggableTransferRow(
+                                payload: payload,
+                                acceptsDropFrom: entry.isDirectory ? _DragSource.remote : null,
+                                onAcceptDrop: entry.isDirectory
+                                    ? (incoming) {
+                                        _enqueueBatchDownloadToLocal(
+                                          incoming.effectiveItems,
+                                          targetLocalDir: entry.path,
+                                        );
+                                      }
                                     : null,
-                                onPrimaryAction: () => _enqueueUpload(entry.path),
-                                onDelete: () => _deleteLocalEntry(entry),
-                                onSecondaryTapUp: (details) =>
-                                    _showLocalContextMenu(context, details.globalPosition, entry),
-                              ),
-                            );
-                          },
-                        ),
+                                child: HoverableFileRow(
+                                  name: entry.name,
+                                  subtitle: entry.isDirectory
+                                      ? 'Folder'
+                                      : '${_formatBytes(entry.size)} • ${_formatDate(entry.modified)}',
+                                  isDir: entry.isDirectory,
+                                  isSelected: isSelected,
+                                  primaryActionIcon: Icons.east,
+                                  primaryActionTooltip: isPartOfMultiSelection
+                                      ? 'Upload ${_selectedLocalPaths.length} selected items to remote'
+                                      : (entry.isDirectory
+                                          ? 'Upload folder to remote'
+                                          : 'Upload to remote'),
+                                  onTap: () => _handleLocalRowTap(index, entry),
+                                  onOpenDirectory: entry.isDirectory
+                                      ? () => _loadLocalDirectory(entry.path)
+                                      : null,
+                                  onPrimaryAction: () {
+                                    if (isPartOfMultiSelection) {
+                                      _uploadSelectedLocalItems();
+                                    } else {
+                                      _enqueueUpload(entry.path);
+                                    }
+                                  },
+                                  onDelete: () {
+                                    if (isPartOfMultiSelection) {
+                                      _deleteSelectedLocalEntries();
+                                    } else {
+                                      _deleteLocalEntry(entry);
+                                    }
+                                  },
+                                  onSecondaryTapUp: (details) =>
+                                      _showLocalContextMenu(context, details.globalPosition, entry),
+                                ),
+                              );
+                            },
+                          ),
                         if (isHighlighted)
                           IgnorePointer(
                             child: Center(
@@ -2275,6 +3064,19 @@ class _SftpTabWidgetState extends State<SftpTabWidget> {
           ),
         ),
 
+        if (_selectedRemoteNames.isNotEmpty)
+          _buildSelectionBar(
+            context: context,
+            selectedCount: _selectedRemoteNames.length,
+            totalCount: _remoteItems.length,
+            onSelectAll: _selectAllRemote,
+            onClear: _clearRemoteSelection,
+            transferLabel: 'Download (${_selectedRemoteNames.length})',
+            transferIcon: _showLocalPane ? Icons.west : Icons.download,
+            onTransfer: _sftpSession != null ? _downloadSelectedRemoteItems : null,
+            onDelete: _sftpSession != null ? _deleteSelectedRemoteItems : null,
+          ),
+
         // Remote File List + DragTarget for Local -> Remote drops + External OS drops
         Expanded(
           child: DropTarget(
@@ -2294,7 +3096,9 @@ class _SftpTabWidgetState extends State<SftpTabWidget> {
               onWillAcceptWithDetails: (details) =>
                   details.data.source == _DragSource.local,
               onAcceptWithDetails: (details) {
-                _enqueueUpload(details.data.path);
+                for (final item in details.data.effectiveItems) {
+                  _enqueueUpload(item.path);
+                }
               },
               builder: (context, candidateData, rejectedData) {
                 final isHighlighted =
@@ -2302,6 +3106,13 @@ class _SftpTabWidgetState extends State<SftpTabWidget> {
 
                 return GestureDetector(
                   behavior: HitTestBehavior.translucent,
+                  onTap: () {
+                    _activePane = _DragSource.remote;
+                    _sftpFocusNode.requestFocus();
+                    if (_selectedRemoteNames.isNotEmpty) {
+                      _clearRemoteSelection();
+                    }
+                  },
                   onSecondaryTapUp: (details) =>
                       _showRemotePaneContextMenu(context, details.globalPosition),
                   onLongPressStart: (details) =>
@@ -2377,6 +3188,24 @@ class _SftpTabWidgetState extends State<SftpTabWidget> {
                               final isDir = item.attr.isDirectory;
                               final remoteItemPath =
                                   p.posix.join(_currentRemotePath, item.filename);
+                              final isSelected =
+                                  _selectedRemoteNames.contains(item.filename);
+                              final isPartOfMultiSelection =
+                                  isSelected && _selectedRemoteNames.length > 1;
+                              final batchPayloads = isPartOfMultiSelection
+                                  ? _selectedRemoteEntries
+                                      .map(
+                                        (e) => _SftpDragPayload(
+                                          source: _DragSource.remote,
+                                          path: p.posix.join(
+                                              _currentRemotePath, e.filename),
+                                          name: e.filename,
+                                          isDirectory: e.attr.isDirectory,
+                                          size: e.attr.size,
+                                        ),
+                                      )
+                                      .toList()
+                                  : null;
 
                               final payload = _SftpDragPayload(
                                 source: _DragSource.remote,
@@ -2384,6 +3213,7 @@ class _SftpTabWidgetState extends State<SftpTabWidget> {
                                 name: item.filename,
                                 isDirectory: isDir,
                                 size: item.attr.size,
+                                batchItems: batchPayloads,
                               );
 
                               return _DraggableTransferRow(
@@ -2391,10 +3221,12 @@ class _SftpTabWidgetState extends State<SftpTabWidget> {
                                 acceptsDropFrom: isDir ? _DragSource.local : null,
                                 onAcceptDrop: isDir
                                     ? (incoming) {
-                                        _enqueueUpload(
-                                          incoming.path,
-                                          targetRemoteDir: remoteItemPath,
-                                        );
+                                        for (final src in incoming.effectiveItems) {
+                                          _enqueueUpload(
+                                            src.path,
+                                            targetRemoteDir: remoteItemPath,
+                                          );
+                                        }
                                       }
                                     : null,
                                 child: HoverableFileRow(
@@ -2403,17 +3235,24 @@ class _SftpTabWidgetState extends State<SftpTabWidget> {
                                       ? 'Folder'
                                       : '${_formatBytes(item.attr.size ?? 0)} • ${item.attr.modifyTime ?? ''}',
                                   isDir: isDir,
+                                  isSelected: isSelected,
                                   primaryActionIcon: _showLocalPane ? Icons.west : Icons.download,
-                                  primaryActionTooltip: _showLocalPane
-                                      ? (isDir
-                                          ? 'Download folder to local pane'
-                                          : 'Download to local pane')
-                                      : 'Save file as...',
-                                  onTap: isDir
+                                  primaryActionTooltip: isPartOfMultiSelection
+                                      ? 'Download ${_selectedRemoteNames.length} selected items'
+                                      : (_showLocalPane
+                                          ? (isDir
+                                              ? 'Download folder to local pane'
+                                              : 'Download to local pane')
+                                          : 'Save file as...'),
+                                  onTap: () => _handleRemoteRowTap(index, item),
+                                  onOpenDirectory: isDir
                                       ? () => _loadRemoteDirectory(remoteItemPath)
                                       : null,
                                   onPrimaryAction: () {
-                                    if (_showLocalPane && _currentLocalPath.isNotEmpty) {
+                                    if (isPartOfMultiSelection) {
+                                      _downloadSelectedRemoteItems();
+                                    } else if (_showLocalPane &&
+                                        _currentLocalPath.isNotEmpty) {
                                       _enqueueDownloadToLocal(
                                         remotePath: remoteItemPath,
                                         name: item.filename,
@@ -2424,7 +3263,13 @@ class _SftpTabWidgetState extends State<SftpTabWidget> {
                                       _enqueueDownloadSaveAs(item);
                                     }
                                   },
-                                  onDelete: () => _deleteRemoteFile(item),
+                                  onDelete: () {
+                                    if (isPartOfMultiSelection) {
+                                      _deleteSelectedRemoteItems();
+                                    } else {
+                                      _deleteRemoteFile(item);
+                                    }
+                                  },
                                   onSecondaryTapUp: (details) =>
                                       _showRemoteContextMenu(context, details.globalPosition, item),
                                 ),
@@ -2605,82 +3450,86 @@ class _SftpTabWidgetState extends State<SftpTabWidget> {
 
   @override
   Widget build(BuildContext context) {
-    return Column(
-      children: [
-        // Optional Assigned Task Banner
-        if (widget.assignedTask != null)
-          Container(
-            width: double.infinity,
-            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
-            color: Theme.of(context).colorScheme.surfaceContainerHighest,
-            child: AssignedTabTaskBanner(
-              task: widget.assignedTask!,
-              onCompleteTask: () => widget.onCompleteAssignedTask?.call(),
-              onUnassignTask: () => widget.onUnassignTask?.call(),
-              onTaskChanged: (updatedTask) => widget.onAssignedTaskChanged?.call(updatedTask),
+    return Focus(
+      focusNode: _sftpFocusNode,
+      onKeyEvent: _handleKeyEvent,
+      child: Column(
+        children: [
+          // Optional Assigned Task Banner
+          if (widget.assignedTask != null)
+            Container(
+              width: double.infinity,
+              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+              color: Theme.of(context).colorScheme.surfaceContainerHighest,
+              child: AssignedTabTaskBanner(
+                task: widget.assignedTask!,
+                onCompleteTask: () => widget.onCompleteAssignedTask?.call(),
+                onUnassignTask: () => widget.onUnassignTask?.call(),
+                onTaskChanged: (updatedTask) => widget.onAssignedTaskChanged?.call(updatedTask),
+              ),
             ),
-          ),
 
-        // Transfer Progress & Queue Indicator
-        if (_activeTransfer != null || _transferStatus != null || _transferQueue.isNotEmpty)
-          _buildTransferBanner(context),
+          // Transfer Progress & Queue Indicator
+          if (_activeTransfer != null || _transferStatus != null || _transferQueue.isNotEmpty)
+            _buildTransferBanner(context),
 
-        // Main Dual-Pane or Single-Pane Area
-        Expanded(
-          child: !_showLocalPane
-              ? _buildRemotePane(context)
-              : LayoutBuilder(
-                  builder: (context, constraints) {
-                    final totalWidth = constraints.maxWidth;
-                    const dividerWidth = 8.0;
-                    final availableWidth = (totalWidth - dividerWidth).clamp(0.0, double.infinity);
-                    final leftWidth = availableWidth * _splitRatio;
-                    final rightWidth = availableWidth - leftWidth;
+          // Main Dual-Pane or Single-Pane Area
+          Expanded(
+            child: !_showLocalPane
+                ? _buildRemotePane(context)
+                : LayoutBuilder(
+                    builder: (context, constraints) {
+                      final totalWidth = constraints.maxWidth;
+                      const dividerWidth = 8.0;
+                      final availableWidth = (totalWidth - dividerWidth).clamp(0.0, double.infinity);
+                      final leftWidth = availableWidth * _splitRatio;
+                      final rightWidth = availableWidth - leftWidth;
 
-                    return Row(
-                      children: [
-                        SizedBox(
-                          width: leftWidth,
-                          child: _buildLocalPane(context),
-                        ),
-                        MouseRegion(
-                          cursor: SystemMouseCursors.resizeColumn,
-                          child: GestureDetector(
-                            behavior: HitTestBehavior.opaque,
-                            onHorizontalDragUpdate: (details) {
-                              if (availableWidth <= 0) return;
-                              setState(() {
-                                _splitRatio = ((_splitRatio * availableWidth + details.delta.dx) /
-                                        availableWidth)
-                                    .clamp(0.2, 0.8);
-                              });
-                            },
-                            child: Container(
-                              width: dividerWidth,
-                              color: Theme.of(context).dividerColor.withAlpha(40),
-                              child: Center(
-                                child: Container(
-                                  width: 2,
-                                  height: 36,
-                                  decoration: BoxDecoration(
-                                    color: Colors.grey.withAlpha(120),
-                                    borderRadius: BorderRadius.circular(1),
+                      return Row(
+                        children: [
+                          SizedBox(
+                            width: leftWidth,
+                            child: _buildLocalPane(context),
+                          ),
+                          MouseRegion(
+                            cursor: SystemMouseCursors.resizeColumn,
+                            child: GestureDetector(
+                              behavior: HitTestBehavior.opaque,
+                              onHorizontalDragUpdate: (details) {
+                                if (availableWidth <= 0) return;
+                                setState(() {
+                                  _splitRatio = ((_splitRatio * availableWidth + details.delta.dx) /
+                                          availableWidth)
+                                      .clamp(0.2, 0.8);
+                                });
+                              },
+                              child: Container(
+                                width: dividerWidth,
+                                color: Theme.of(context).dividerColor.withAlpha(40),
+                                child: Center(
+                                  child: Container(
+                                    width: 2,
+                                    height: 36,
+                                    decoration: BoxDecoration(
+                                      color: Colors.grey.withAlpha(120),
+                                      borderRadius: BorderRadius.circular(1),
+                                    ),
                                   ),
                                 ),
                               ),
                             ),
                           ),
-                        ),
-                        SizedBox(
-                          width: rightWidth,
-                          child: _buildRemotePane(context),
-                        ),
-                      ],
-                    );
-                  },
-                ),
-        ),
-      ],
+                          SizedBox(
+                            width: rightWidth,
+                            child: _buildRemotePane(context),
+                          ),
+                        ],
+                      );
+                    },
+                  ),
+          ),
+        ],
+      ),
     );
   }
 }
@@ -2721,6 +3570,8 @@ class _DraggableTransferRow extends StatelessWidget {
       );
     }
 
+    final batchCount = payload.effectiveItems.length;
+
     return Draggable<_SftpDragPayload>(
       data: payload,
       dragAnchorStrategy: pointerDragAnchorStrategy,
@@ -2734,13 +3585,17 @@ class _DraggableTransferRow extends StatelessWidget {
             mainAxisSize: MainAxisSize.min,
             children: [
               Icon(
-                payload.isDirectory ? Icons.folder : Icons.insert_drive_file,
+                batchCount > 1
+                    ? Icons.library_books_outlined
+                    : (payload.isDirectory ? Icons.folder : Icons.insert_drive_file),
                 color: payload.isDirectory ? Colors.amber : Colors.lightBlueAccent,
                 size: 18,
               ),
               const SizedBox(width: 8),
               Text(
-                payload.name,
+                batchCount > 1
+                    ? '${payload.name} (+${batchCount - 1} more)'
+                    : payload.name,
                 style: const TextStyle(
                   color: Colors.white,
                   fontSize: 13,
@@ -2770,9 +3625,11 @@ class HoverableFileRow extends StatefulWidget {
   final String name;
   final String subtitle;
   final bool isDir;
+  final bool isSelected;
   final IconData primaryActionIcon;
   final String primaryActionTooltip;
   final VoidCallback? onTap;
+  final VoidCallback? onOpenDirectory;
   final VoidCallback? onPrimaryAction;
   final VoidCallback onDelete;
   final Function(TapUpDetails details) onSecondaryTapUp;
@@ -2782,9 +3639,11 @@ class HoverableFileRow extends StatefulWidget {
     required this.name,
     required this.subtitle,
     required this.isDir,
+    this.isSelected = false,
     required this.primaryActionIcon,
     required this.primaryActionTooltip,
     this.onTap,
+    this.onOpenDirectory,
     this.onPrimaryAction,
     required this.onDelete,
     required this.onSecondaryTapUp,
@@ -2801,6 +3660,11 @@ class _HoverableFileRowState extends State<HoverableFileRow> {
   Widget build(BuildContext context) {
     final isTouchPlatform = Platform.isAndroid || Platform.isIOS;
     final showActions = _isHovered || isTouchPlatform;
+    final colorScheme = Theme.of(context).colorScheme;
+
+    final bgColor = widget.isSelected
+        ? colorScheme.primary.withAlpha(_isHovered ? 65 : 45)
+        : (_isHovered ? Colors.white.withAlpha(15) : Colors.transparent);
 
     return MouseRegion(
       onEnter: (_) => setState(() => _isHovered = true),
@@ -2815,45 +3679,67 @@ class _HoverableFileRowState extends State<HoverableFileRow> {
           ),
         ),
         child: Container(
-          color: _isHovered ? Colors.white.withAlpha(15) : Colors.transparent,
-          child: ListTile(
-            dense: true,
-            leading: Icon(
-              widget.isDir ? Icons.folder : Icons.insert_drive_file,
-              color: widget.isDir ? Colors.amber : Colors.blueGrey,
-            ),
-            title: Text(
-              widget.name,
-              overflow: TextOverflow.ellipsis,
-            ),
-            subtitle: Text(
-              widget.subtitle,
-              style: const TextStyle(fontSize: 11),
-              overflow: TextOverflow.ellipsis,
-            ),
-            trailing: showActions
-                ? Row(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      if (widget.onPrimaryAction != null)
-                        IconButton(
-                          icon: Icon(widget.primaryActionIcon, size: 18),
-                          tooltip: widget.primaryActionTooltip,
-                          onPressed: widget.onPrimaryAction,
-                        ),
-                      IconButton(
-                        icon: Icon(
-                          widget.isDir ? Icons.folder_delete_outlined : Icons.delete_outline,
-                          size: 18,
-                          color: Colors.redAccent,
-                        ),
-                        tooltip: widget.isDir ? 'Remove Directory' : 'Delete File',
-                        onPressed: widget.onDelete,
-                      ),
-                    ],
+          decoration: BoxDecoration(
+            color: bgColor,
+            border: widget.isSelected
+                ? Border(
+                    left: BorderSide(
+                      color: colorScheme.primary,
+                      width: 3,
+                    ),
                   )
                 : null,
-            onTap: widget.onTap,
+          ),
+          child: Material(
+            color: Colors.transparent,
+            child: ListTile(
+              dense: true,
+              selected: widget.isSelected,
+              leading: Icon(
+                widget.isDir ? Icons.folder : Icons.insert_drive_file,
+                color: widget.isDir
+                    ? Colors.amber
+                    : (widget.isSelected ? colorScheme.primary : Colors.blueGrey),
+              ),
+              title: Text(
+                widget.name,
+                overflow: TextOverflow.ellipsis,
+              ),
+              subtitle: Text(
+                widget.subtitle,
+                style: const TextStyle(fontSize: 11),
+                overflow: TextOverflow.ellipsis,
+              ),
+              trailing: showActions
+                  ? Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        if (widget.isDir && widget.onOpenDirectory != null)
+                          IconButton(
+                            icon: const Icon(Icons.folder_open, size: 18),
+                            tooltip: 'Open Directory',
+                            onPressed: widget.onOpenDirectory,
+                          ),
+                        if (widget.onPrimaryAction != null)
+                          IconButton(
+                            icon: Icon(widget.primaryActionIcon, size: 18),
+                            tooltip: widget.primaryActionTooltip,
+                            onPressed: widget.onPrimaryAction,
+                          ),
+                        IconButton(
+                          icon: Icon(
+                            widget.isDir ? Icons.folder_delete_outlined : Icons.delete_outline,
+                            size: 18,
+                            color: Colors.redAccent,
+                          ),
+                          tooltip: widget.isDir ? 'Remove Directory' : 'Delete File',
+                          onPressed: widget.onDelete,
+                        ),
+                      ],
+                    )
+                  : null,
+              onTap: widget.onTap,
+            ),
           ),
         ),
       ),
