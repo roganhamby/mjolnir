@@ -1,7 +1,10 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:mjolnir/main.dart';
+import 'package:mjolnir/models/server_config.dart';
 import 'package:mjolnir/models/sync_vault_file.dart';
+import 'package:mjolnir/services/known_hosts_service.dart';
+import 'package:mjolnir/services/ssh_service.dart';
 import 'package:mjolnir/services/vault_manager.dart';
 import 'package:mjolnir/services/sync_storage_provider.dart';
 
@@ -23,6 +26,29 @@ class _InMemoryStorageProvider implements SyncStorageProvider {
   @override
   Future<void> saveVault(SyncVaultFile vault) async {
     stored = vault;
+  }
+}
+
+class _OfflineSshService extends SshService {
+  @override
+  Future<SshSession> startShellSession(
+    ServerConfig server, {
+    int terminalWidth = 80,
+    int terminalHeight = 24,
+    int terminalPixelWidth = 0,
+    int terminalPixelHeight = 0,
+    int Function()? getTerminalWidth,
+    int Function()? getTerminalHeight,
+    int Function()? getTerminalPixelWidth,
+    int Function()? getTerminalPixelHeight,
+    HostKeyPromptHandler? onPromptHostKey,
+  }) async {
+    throw HostKeyUnknownException(
+      host: server.host,
+      port: server.port,
+      keyType: 'ssh-ed25519',
+      fingerprint: 'SHA256:offlineTest',
+    );
   }
 }
 
@@ -62,21 +88,42 @@ void main() {
 
   group('Per-Tab Timer Widget Integration Tests', () {
     late VaultManager vaultManager;
+    late SshService sshService;
 
     setUp(() async {
       final provider = _InMemoryStorageProvider();
       vaultManager = VaultManager(storageProvider: provider);
       await vaultManager.init();
       await vaultManager.unlock('test-password-123');
+      await vaultManager.saveServer(
+        ServerConfig(
+          id: 'srv-1',
+          name: 'Alpha',
+          host: '10.0.0.1',
+          port: 22,
+          username: 'root',
+        ),
+      );
+      sshService = _OfflineSshService();
     });
 
     Widget buildApp() {
       return MaterialApp(
-        home: MainScreen(vaultManager: vaultManager),
+        home: MainScreen(
+          vaultManager: vaultManager,
+          sshService: sshService,
+        ),
       );
     }
 
-    testWidgets('Timer starts, ticks, and stops in UI with reset support', (tester) async {
+    Future<void> openSshTerminalTab(WidgetTester tester) async {
+      await tester.tap(find.byIcon(Icons.more_vert).first);
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Open SSH Terminal'));
+      await tester.pumpAndSettle();
+    }
+
+    testWidgets('Timer is positioned left of the recording button and starts, ticks, stops, and resets', (tester) async {
       tester.view.physicalSize = const Size(1280, 800);
       tester.view.devicePixelRatio = 1.0;
       addTearDown(tester.view.resetPhysicalSize);
@@ -85,12 +132,16 @@ void main() {
       await tester.pumpWidget(buildApp());
       await tester.pumpAndSettle();
 
-      // Open Task Manager tab from AppBar
-      await tester.tap(find.text('Tasks'));
-      await tester.pumpAndSettle();
+      await openSshTerminalTab(tester);
 
-      expect(find.text('Task Manager'), findsOneWidget);
+      expect(find.text('Alpha (SSH)'), findsOneWidget);
       expect(find.text('00:00'), findsOneWidget);
+
+      // Verify timer is to the left of the button to start recording
+      final timerCenter = tester.getCenter(find.text('00:00'));
+      final recordBtnCenter = tester.getCenter(find.byIcon(Icons.fiber_manual_record_outlined));
+      expect(timerCenter.dx, lessThan(recordBtnCenter.dx));
+      expect((timerCenter.dy - recordBtnCenter.dy).abs(), lessThan(10));
 
       // Tap timer capsule to start
       final timerFinder = find.ancestor(
@@ -118,14 +169,15 @@ void main() {
       await tester.pump(const Duration(seconds: 3));
       expect(find.text('00:03'), findsOneWidget);
 
-      // Tap Reset button (refresh icon)
-      expect(find.byIcon(Icons.refresh), findsOneWidget);
-      await tester.tap(find.byIcon(Icons.refresh));
+      // Tap Reset button (refresh icon inside timer widget)
+      final resetFinder = find.byTooltip('Reset timer to 00:00');
+      expect(resetFinder, findsOneWidget);
+      await tester.tap(resetFinder);
       await tester.pump();
 
       // Successfully reset to 00:00
       expect(find.text('00:00'), findsOneWidget);
-      expect(find.byIcon(Icons.refresh), findsNothing);
+      expect(resetFinder, findsNothing);
     });
 
     testWidgets('Timer auto-stops when tab is clicked off (switched)', (tester) async {
@@ -137,23 +189,22 @@ void main() {
       await tester.pumpWidget(buildApp());
       await tester.pumpAndSettle();
 
-      // Open Tasks and Pasteboard tabs
+      // Open Tasks tab and SSH terminal tab
       await tester.tap(find.text('Tasks'));
       await tester.pumpAndSettle();
 
-      await tester.tap(find.text('Pasteboard'));
-      await tester.pumpAndSettle();
+      await openSshTerminalTab(tester);
 
       expect(find.text('Task Manager'), findsOneWidget);
-      expect(find.text('Pasteboard'), findsNWidgets(2)); // AppBar action + Tab title
+      expect(find.text('Alpha (SSH)'), findsOneWidget);
 
-      // Start timer on Pasteboard tab (currently active)
-      final pasteboardTimer = find.ancestor(
-        of: find.text('00:00').last,
+      // Start timer on SSH terminal tab (currently active)
+      final sshTimer = find.ancestor(
+        of: find.text('00:00'),
         matching: find.byType(InkWell),
       ).first;
 
-      await tester.tap(pasteboardTimer);
+      await tester.tap(sshTimer);
       await tester.pump();
 
       // Tick for 4 seconds
@@ -164,10 +215,12 @@ void main() {
       await tester.tap(find.text('Task Manager'));
       await tester.pumpAndSettle();
 
-      // Advance 5 seconds
+      // Advance 5 seconds while on Task Manager tab
       await tester.pump(const Duration(seconds: 5));
 
-      // Pasteboard tab timer auto-stopped at 00:04 and did not keep ticking!
+      // Switch back to SSH terminal tab and verify timer auto-stopped at 00:04
+      await tester.tap(find.text('Alpha (SSH)'));
+      await tester.pumpAndSettle();
       expect(find.text('00:04'), findsOneWidget);
     });
 
@@ -180,9 +233,7 @@ void main() {
       await tester.pumpWidget(buildApp());
       await tester.pumpAndSettle();
 
-      // Open Tasks tab
-      await tester.tap(find.text('Tasks'));
-      await tester.pumpAndSettle();
+      await openSshTerminalTab(tester);
 
       // Start timer
       final timerPill = find.ancestor(

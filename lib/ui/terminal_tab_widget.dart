@@ -32,6 +32,7 @@ class TerminalTabWidget extends StatefulWidget {
   final VoidCallback? onClose;
   final Function(double newFontSize)? onFontSizeChanged;
   final Function(String newThemeName)? onThemeChanged;
+  final Widget? timerWidget;
 
   const TerminalTabWidget({
     super.key,
@@ -48,6 +49,7 @@ class TerminalTabWidget extends StatefulWidget {
     this.onClose,
     this.onFontSizeChanged,
     this.onThemeChanged,
+    this.timerWidget,
   });
 
   @override
@@ -1650,6 +1652,16 @@ Total Characters Logged: $_screenLogBytesWritten
                 child: Row(
                   mainAxisSize: MainAxisSize.min,
                   children: [
+                    if (widget.timerWidget != null) ...[
+                      widget.timerWidget!,
+                      Container(
+                        height: 14,
+                        width: 1,
+                        color: scheme.borderColor,
+                        margin: const EdgeInsets.symmetric(horizontal: 4),
+                      ),
+                    ],
+
                     // Screen Logging Controls
                     if (_isScreenLogging)
                       InkWell(

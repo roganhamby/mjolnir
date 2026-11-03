@@ -146,12 +146,14 @@ class MainScreen extends StatefulWidget {
   final AppColorScheme currentColorScheme;
   final ValueChanged<String>? onColorSchemeChanged;
   final VaultManager? vaultManager;
+  final SshService? sshService;
 
   const MainScreen({
     super.key,
     this.currentColorScheme = AppColorSchemes.mjolnirAmber,
     this.onColorSchemeChanged,
     this.vaultManager,
+    this.sshService,
   });
 
   @override
@@ -160,7 +162,7 @@ class MainScreen extends StatefulWidget {
 
 class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
   late final VaultManager _vaultManager;
-  final SshService _sshService = SshService();
+  late final SshService _sshService;
   final GlobalKey _pasteboardButtonKey = GlobalKey();
 
   final List<TabItem> _openTabs = [];
@@ -187,6 +189,7 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
+    _sshService = widget.sshService ?? SshService();
 
     _sshService.hostKeyPromptHandler = ({
       required ServerConfig server,
@@ -433,7 +436,7 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
             children: [
               Icon(Icons.terminal, size: 16),
               SizedBox(width: 8),
-              Text('Open SSH Terminal'),
+              Flexible(child: Text('Open SSH Terminal')),
             ],
           ),
         ),
@@ -443,7 +446,7 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
             children: [
               Icon(Icons.folder_shared, size: 16),
               SizedBox(width: 8),
-              Text('Open SFTP Browser'),
+              Flexible(child: Text('Open SFTP Browser')),
             ],
           ),
         ),
@@ -2093,7 +2096,7 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
                                 children: [
                                   Icon(Icons.terminal, size: 16),
                                   SizedBox(width: 8),
-                                  Text('Open SSH Terminal'),
+                                  Flexible(child: Text('Open SSH Terminal')),
                                 ],
                               ),
                             ),
@@ -2103,7 +2106,7 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
                                 children: [
                                   Icon(Icons.folder_shared, size: 16),
                                   SizedBox(width: 8),
-                                  Text('Open SFTP Browser'),
+                                  Flexible(child: Text('Open SFTP Browser')),
                                 ],
                               ),
                             ),
@@ -2385,7 +2388,6 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
                               ),
                             ),
                           ),
-                          _buildTabTimerWidget(tab, index, isActive, scheme),
                           Padding(
                             padding: const EdgeInsets.only(right: 4),
                             child: InkWell(
@@ -2485,6 +2487,7 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
                     await _vaultManager.saveServer(server);
                   },
                   onClose: () => _closeTab(t.id),
+                  timerWidget: _buildTabTimerWidget(t, tabIndex, tabIndex == _activeTabIndex, scheme),
                 );
               } else {
                 final server = t.server!;
