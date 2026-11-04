@@ -109,6 +109,26 @@ typedef _CallocDart = Pointer<Void> Function(int nmemb, int size);
 typedef _FreeNative = Void Function(Pointer<Void> ptr);
 typedef _FreeDart = void Function(Pointer<Void> ptr);
 
+typedef _ErrnoLocationNative = Pointer<Int32> Function();
+typedef _ErrnoLocationDart = Pointer<Int32> Function();
+
+Pointer<Int32> Function() _lookupErrnoLocation(DynamicLibrary lib) {
+  if (Platform.isMacOS || Platform.isIOS) {
+    return lib.lookupFunction<_ErrnoLocationNative, _ErrnoLocationDart>(
+      '__error',
+    );
+  }
+  return lib.lookupFunction<_ErrnoLocationNative, _ErrnoLocationDart>(
+    '__errno_location',
+  );
+}
+
+bool _isRetryableErrno(int err) {
+  const eintr = 4;
+  final eagain = (Platform.isMacOS || Platform.isIOS) ? 35 : 11;
+  return err == eintr || err == eagain;
+}
+
 typedef _SpawnAttrInitNative = Int32 Function(Pointer<Void> attr);
 typedef _SpawnAttrInitDart = int Function(Pointer<Void> attr);
 
@@ -188,6 +208,7 @@ void _ptyReaderIsolateEntry(_PtyReaderArgs args) {
   final malloc = lib.lookupFunction<_MallocNative, _MallocDart>('malloc');
   final calloc = lib.lookupFunction<_CallocNative, _CallocDart>('calloc');
   final free = lib.lookupFunction<_FreeNative, _FreeDart>('free');
+  final errnoLocation = _lookupErrnoLocation(lib);
 
   const bufSize = 4096;
   const pollIn = 0x0001;
@@ -208,6 +229,9 @@ void _ptyReaderIsolateEntry(_PtyReaderArgs args) {
         continue;
       }
       if (pollRc < 0) {
+        if (_isRetryableErrno(errnoLocation().value)) {
+          continue;
+        }
         break;
       }
       final revents = pfd.ref.revents;
@@ -219,6 +243,8 @@ void _ptyReaderIsolateEntry(_PtyReaderArgs args) {
         if (n > 0) {
           final chunk = Uint8List.fromList(buf.asTypedList(n));
           args.sendPort.send(chunk);
+        } else if (n < 0 && _isRetryableErrno(errnoLocation().value)) {
+          continue;
         } else {
           break;
         }
@@ -272,8 +298,21 @@ class _PosixPtyShellSession implements LocalShellSession {
   final ReceivePort _receivePort;
   Isolate? _readerIsolate;
 
-  final StreamController<Uint8List> _stdoutController =
-      StreamController<Uint8List>.broadcast();
+  final List<Uint8List> _pendingStdout = [];
+  late final StreamController<Uint8List> _stdoutController =
+      StreamController<Uint8List>.broadcast(
+    onListen: () {
+      if (_pendingStdout.isNotEmpty) {
+        final pending = List<Uint8List>.of(_pendingStdout);
+        _pendingStdout.clear();
+        for (final chunk in pending) {
+          if (!_stdoutController.isClosed) {
+            _stdoutController.add(chunk);
+          }
+        }
+      }
+    },
+  );
   final StreamController<Uint8List> _stderrController =
       StreamController<Uint8List>.broadcast();
 
@@ -293,6 +332,7 @@ class _PosixPtyShellSession implements LocalShellSession {
       _libc.lookupFunction<_MallocNative, _MallocDart>('malloc');
   late final _FreeDart _free =
       _libc.lookupFunction<_FreeNative, _FreeDart>('free');
+  late final _ErrnoLocationDart _errnoLocation = _lookupErrnoLocation(_libc);
 
   _PosixPtyShellSession({
     required this.shellPath,
@@ -307,7 +347,11 @@ class _PosixPtyShellSession implements LocalShellSession {
     _receivePort.listen((message) {
       if (message is Uint8List) {
         if (!_stdoutController.isClosed) {
-          _stdoutController.add(message);
+          if (_stdoutController.hasListener) {
+            _stdoutController.add(message);
+          } else {
+            _pendingStdout.add(message);
+          }
         }
       } else if (message is int) {
         _exitCode = message;
@@ -341,7 +385,13 @@ class _PosixPtyShellSession implements LocalShellSession {
           ptr + offset,
           data.length - offset,
         );
-        if (written <= 0) break;
+        if (written < 0) {
+          if (_isRetryableErrno(_errnoLocation().value)) {
+            continue;
+          }
+          break;
+        }
+        if (written == 0) break;
         offset += written;
       }
     } finally {
