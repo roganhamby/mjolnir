@@ -4,6 +4,7 @@ import 'package:cryptography/cryptography.dart';
 import '../models/server_config.dart';
 import '../models/stored_string_item.dart';
 import '../models/task_item.dart';
+import '../models/terminal_macro_item.dart';
 import '../models/sync_vault_file.dart';
 import 'crypto_vault_service.dart';
 import 'sftp_sync_service.dart';
@@ -30,6 +31,7 @@ class VaultManager with ChangeNotifier {
   List<ServerConfig> get servers => _vault?.servers ?? [];
   List<TaskItem> get tasks => _vault?.tasks ?? [];
   List<StoredStringItem> get storedStrings => _vault?.storedStrings ?? [];
+  List<TerminalMacroItem> get macros => _vault?.macros ?? [];
   String? get errorMessage => _errorMessage;
   String get loadedSource => _loadedSource;
 
@@ -51,6 +53,7 @@ class VaultManager with ChangeNotifier {
                 (activeVault.servers.isNotEmpty ||
                     activeVault.tasks.isNotEmpty ||
                     activeVault.storedStrings.isNotEmpty ||
+                    activeVault.macros.isNotEmpty ||
                     activeVault.encryptedSftpSyncConfig != null ||
                     activeVault.vaultPayload != null);
             if (SyncVaultFile.isNewerVault(
@@ -234,6 +237,7 @@ class VaultManager with ChangeNotifier {
       _vault!.servers = [];
       _vault!.tasks = [];
       _vault!.storedStrings = [];
+      _vault!.macros = [];
     }
     notifyListeners();
   }
@@ -317,6 +321,17 @@ class VaultManager with ChangeNotifier {
         }
       } else {
         _vault!.storedStrings.add(item);
+      }
+    }
+
+    for (final item in importedVault.macros) {
+      final existingIndex = _vault!.macros.indexWhere((m) => m.id == item.id);
+      if (existingIndex >= 0) {
+        if (item.updatedAt.isAfter(_vault!.macros[existingIndex].updatedAt)) {
+          _vault!.macros[existingIndex] = item;
+        }
+      } else {
+        _vault!.macros.add(item);
       }
     }
 
@@ -461,6 +476,37 @@ class VaultManager with ChangeNotifier {
     notifyListeners();
   }
 
+  /// Adds or updates a terminal macro item and persists the vault.
+  Future<void> saveMacro(TerminalMacroItem item) async {
+    if (!_isUnlocked || _vault == null) {
+      throw StateError('Cannot modify macros while vault is locked.');
+    }
+
+    item.updatedAt = DateTime.now().toUtc();
+    final existingIndex = _vault!.macros.indexWhere((m) => m.id == item.id);
+    if (existingIndex >= 0) {
+      _vault!.macros[existingIndex] = item;
+    } else {
+      _vault!.macros.add(item);
+    }
+
+    _vault!.updatedAt = DateTime.now().toUtc();
+    await _persistVault();
+    notifyListeners();
+  }
+
+  /// Deletes a terminal macro item by ID and persists the vault.
+  Future<void> deleteMacro(String id) async {
+    if (!_isUnlocked || _vault == null) {
+      throw StateError('Cannot modify macros while vault is locked.');
+    }
+
+    _vault!.macros.removeWhere((m) => m.id == id);
+    _vault!.updatedAt = DateTime.now().toUtc();
+    await _persistVault();
+    notifyListeners();
+  }
+
   /// Exports the current vault as an encrypted JSON string
   String exportVaultJson() {
     if (_vault == null) {
@@ -538,6 +584,7 @@ class VaultManager with ChangeNotifier {
         (_vault!.servers.isNotEmpty ||
             _vault!.tasks.isNotEmpty ||
             _vault!.storedStrings.isNotEmpty ||
+            _vault!.macros.isNotEmpty ||
             _vault!.encryptedSftpSyncConfig != null ||
             _vault!.vaultPayload != null);
     if (_vault == null ||

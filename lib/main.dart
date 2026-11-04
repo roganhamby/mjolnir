@@ -10,6 +10,7 @@ import 'package:intl/intl.dart';
 import 'models/server_config.dart';
 import 'models/task_item.dart';
 import 'models/stored_string_item.dart';
+import 'models/terminal_macro_item.dart';
 import 'services/local_shell_service.dart';
 import 'services/sftp_sync_service.dart';
 import 'services/sync_storage_provider.dart';
@@ -19,6 +20,7 @@ import 'ui/terminal_tab_widget.dart';
 import 'ui/sftp_tab_widget.dart';
 import 'ui/task_manager_tab_widget.dart';
 import 'ui/stored_strings_tab_widget.dart';
+import 'ui/macros_tab_widget.dart';
 import 'ui/server_edit_dialog.dart';
 import 'ui/host_key_verify_dialog.dart';
 import 'ui/known_hosts_manager_dialog.dart';
@@ -419,6 +421,30 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
           icon: Icons.content_paste,
           color: Colors.tealAccent,
           type: 'strings',
+        ),
+      );
+      _activeTabIndex = _openTabs.length - 1;
+      _collapseSidebarIfNarrowScreen();
+    });
+  }
+
+  void _openMacrosTab() {
+    final existingIndex = _openTabs.indexWhere((t) => t.type == 'macros');
+    if (existingIndex >= 0) {
+      _setActiveTabIndex(existingIndex);
+      _collapseSidebarIfNarrowScreen();
+      return;
+    }
+
+    _stopActiveTabTimer();
+    setState(() {
+      _openTabs.add(
+        TabItem(
+          id: 'macros-${DateTime.now().millisecondsSinceEpoch}',
+          title: 'Macros',
+          icon: Icons.bolt,
+          color: Colors.deepPurpleAccent,
+          type: 'macros',
         ),
       );
       _activeTabIndex = _openTabs.length - 1;
@@ -1722,6 +1748,23 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
           actions: [
             TextButton.icon(
               icon: Icon(
+                Icons.bolt,
+                size: 18,
+                color: scheme.accentColor,
+              ),
+              label: Text(
+                _vaultManager.macros.isEmpty
+                    ? 'Macros'
+                    : 'Macros (${_vaultManager.macros.length})',
+                style: TextStyle(
+                  fontSize: 12,
+                  color: scheme.primaryText,
+                ),
+              ),
+              onPressed: _openMacrosTab,
+            ),
+            TextButton.icon(
+              icon: Icon(
                 Icons.task_alt,
                 size: 18,
                 color: _vaultManager.tasks.any((t) => t.isOverdue)
@@ -2248,6 +2291,11 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
                     onPressed: () => setState(() => _isSidebarCollapsed = false),
                   ),
                 OutlinedButton.icon(
+                  icon: Icon(Icons.bolt, size: 16, color: scheme.accentColor),
+                  label: const Text('Open Macros'),
+                  onPressed: _openMacrosTab,
+                ),
+                OutlinedButton.icon(
                   icon: Icon(Icons.task_alt, size: 16, color: scheme.accentColor),
                   label: const Text('Open Task Manager'),
                   onPressed: _openTaskManagerTab,
@@ -2537,6 +2585,19 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
                     if (mounted) setState(() {});
                   },
                 );
+              } else if (t.type == 'macros') {
+                return MacrosTabWidget(
+                  key: ValueKey(t.id),
+                  macros: _vaultManager.macros,
+                  onSaveMacro: (macro) async {
+                    await _vaultManager.saveMacro(macro);
+                    if (mounted) setState(() {});
+                  },
+                  onDeleteMacro: (id) async {
+                    await _vaultManager.deleteMacro(id);
+                    if (mounted) setState(() {});
+                  },
+                );
               } else if (t.type == 'ssh' || t.type == 'local') {
                 final server = t.server!;
                 final isLocal = t.type == 'local';
@@ -2546,6 +2607,7 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
                   sshService: _sshService,
                   isLocalShell: isLocal,
                   localShellService: _localShellService,
+                  getMacros: () => _vaultManager.macros,
                   theme: AnsiThemes.all[server.terminalTheme] ?? AnsiThemes.all[t.themeName] ?? TerminalThemes.defaultTheme,
                   initialThemeName: server.terminalTheme.isNotEmpty ? server.terminalTheme : t.themeName,
                   fontSize: t.fontSize,

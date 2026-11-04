@@ -3,6 +3,7 @@ import 'package:cryptography/cryptography.dart';
 import 'server_config.dart';
 import 'stored_string_item.dart';
 import 'task_item.dart';
+import 'terminal_macro_item.dart';
 import '../services/crypto_vault_service.dart';
 
 class SyncVaultFile {
@@ -15,6 +16,7 @@ class SyncVaultFile {
   List<ServerConfig> servers;
   List<TaskItem> tasks;
   List<StoredStringItem> storedStrings;
+  List<TerminalMacroItem> macros;
 
   SyncVaultFile({
     this.version = 1,
@@ -26,10 +28,12 @@ class SyncVaultFile {
     List<ServerConfig>? servers,
     List<TaskItem>? tasks,
     List<StoredStringItem>? storedStrings,
+    List<TerminalMacroItem>? macros,
   })  : updatedAt = updatedAt ?? DateTime.now().toUtc(),
         servers = servers ?? [],
         tasks = tasks ?? [],
-        storedStrings = storedStrings ?? [];
+        storedStrings = storedStrings ?? [],
+        macros = macros ?? [];
 
   bool get isEncryptedEnvelope => vaultPayload != null;
 
@@ -41,6 +45,7 @@ class SyncVaultFile {
       servers: [],
       tasks: [],
       storedStrings: [],
+      macros: [],
     );
   }
 
@@ -62,6 +67,7 @@ class SyncVaultFile {
           'servers': servers.map((s) => s.toJson()).toList(),
           'tasks': tasks.map((t) => t.toJson()).toList(),
           'stored_strings': storedStrings.map((s) => s.toJson()).toList(),
+          'macros': macros.map((m) => m.toJson()).toList(),
         },
       };
 
@@ -78,6 +84,9 @@ class SyncVaultFile {
     final stringList = (json['stored_strings'] as List<dynamic>? ?? [])
         .map((e) => StoredStringItem.fromJson(e as Map<String, dynamic>))
         .toList();
+    final macroList = (json['macros'] as List<dynamic>? ?? [])
+        .map((e) => TerminalMacroItem.fromJson(e as Map<String, dynamic>))
+        .toList();
 
     return SyncVaultFile(
       version: json['version'] as int? ?? (vPayload != null ? 2 : 1),
@@ -92,6 +101,7 @@ class SyncVaultFile {
       servers: serverList,
       tasks: taskList,
       storedStrings: stringList,
+      macros: macroList,
     );
   }
 
@@ -118,14 +128,20 @@ class SyncVaultFile {
           .map((e) => StoredStringItem.fromJson(e as Map<String, dynamic>))
           .toList();
     }
+    if (decryptedMap['macros'] is List) {
+      macros = (decryptedMap['macros'] as List)
+          .map((e) => TerminalMacroItem.fromJson(e as Map<String, dynamic>))
+          .toList();
+    }
   }
 
-  /// Encrypts in-memory servers, tasks, and stored_strings into [vaultPayload].
+  /// Encrypts in-memory servers, tasks, stored_strings, and macros into [vaultPayload].
   Future<void> encryptPayload(CryptoVaultService cryptoService, SecretKey masterKey) async {
     final innerData = {
       'servers': servers.map((s) => s.toJson()).toList(),
       'tasks': tasks.map((t) => t.toJson()).toList(),
       'stored_strings': storedStrings.map((s) => s.toJson()).toList(),
+      'macros': macros.map((m) => m.toJson()).toList(),
     };
     vaultPayload = await cryptoService.encryptPayload(
       payload: innerData,
@@ -191,6 +207,22 @@ class SyncVaultFile {
       }
     }
 
+    final Map<String, TerminalMacroItem> currentMacroMap = {
+      for (var m in macros) m.id: m,
+    };
+
+    for (final remoteMacro in remoteVault.macros) {
+      if (!currentMacroMap.containsKey(remoteMacro.id)) {
+        macros.add(remoteMacro);
+      } else {
+        final localMacro = currentMacroMap[remoteMacro.id]!;
+        if (remoteMacro.updatedAt.isAfter(localMacro.updatedAt)) {
+          final index = macros.indexOf(localMacro);
+          macros[index] = remoteMacro;
+        }
+      }
+    }
+
     if (remoteVault.encryptedSftpSyncConfig != null &&
         (encryptedSftpSyncConfig == null ||
             remoteVault.updatedAt.isAfter(updatedAt))) {
@@ -211,6 +243,7 @@ class SyncVaultFile {
         (candidate.servers.isNotEmpty ||
             candidate.tasks.isNotEmpty ||
             candidate.storedStrings.isNotEmpty ||
+            candidate.macros.isNotEmpty ||
             candidate.encryptedSftpSyncConfig != null ||
             candidate.vaultPayload != null)) {
       return true;
