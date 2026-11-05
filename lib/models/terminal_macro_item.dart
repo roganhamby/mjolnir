@@ -24,11 +24,11 @@ class TerminalMacroItem {
   })  : createdAt = createdAt ?? DateTime.now().toUtc(),
         updatedAt = updatedAt ?? DateTime.now().toUtc();
 
-  /// Normalized trigger string without leading colons (e.g. "send" for "::send")
-  String get cleanTrigger => trigger.replaceFirst(RegExp(r'^:+'), '').trim();
+  /// Normalized trigger string without leading question marks or colons (e.g. "send" for "??send" or "::send")
+  String get cleanTrigger => trigger.replaceFirst(RegExp(r'^[?:]+'), '').trim();
 
-  /// Formatted trigger with :: prefix (e.g. "::send")
-  String get formattedTrigger => '::$cleanTrigger';
+  /// Formatted trigger with ?? prefix (e.g. "??send")
+  String get formattedTrigger => '??$cleanTrigger';
 
   /// Interpolates placeholders in [replacement] with arguments from [rawArgs].
   /// Supported placeholders:

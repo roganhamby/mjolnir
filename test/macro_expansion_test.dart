@@ -26,7 +26,16 @@ void main() {
       );
 
       expect(macro.cleanTrigger, 'send');
-      expect(macro.formattedTrigger, '::send');
+      expect(macro.formattedTrigger, '??send');
+
+      final macroWithQuestionMarks = TerminalMacroItem(
+        id: '1b',
+        name: 'Send to Nox QM',
+        trigger: '??send',
+        replacement: 'echo test',
+      );
+      expect(macroWithQuestionMarks.cleanTrigger, 'send');
+      expect(macroWithQuestionMarks.formattedTrigger, '??send');
 
       final result = macro.interpolate('this.txt');
       expect(
@@ -281,9 +290,9 @@ void main() {
       );
 
       expect(find.text('Terminal Macros (2)'), findsOneWidget);
-      expect(find.text('::send'), findsOneWidget);
+      expect(find.text('??send'), findsOneWidget);
       expect(find.text('Send to Nox'), findsOneWidget);
-      expect(find.text('::gs'), findsOneWidget);
+      expect(find.text('??gs'), findsOneWidget);
       expect(find.text('Git Status'), findsOneWidget);
       expect(find.text('Password (60s clear)'), findsOneWidget);
 
@@ -291,8 +300,98 @@ void main() {
       await tester.enterText(find.byType(TextField).first, 'nox');
       await tester.pump();
 
-      expect(find.text('::send'), findsOneWidget);
-      expect(find.text('::gs'), findsNothing);
+      expect(find.text('??send'), findsOneWidget);
+      expect(find.text('??gs'), findsNothing);
+    });
+  });
+
+  group('TerminalMacroEngine Boundary & Interactive Processing', () {
+    late TerminalMacroEngine engine;
+    late List<TerminalMacroItem> macros;
+    late List<List<int>> writtenBytes;
+    late List<TerminalMacroItem> triggeredSecrets;
+
+    setUp(() {
+      engine = TerminalMacroEngine();
+      writtenBytes = [];
+      triggeredSecrets = [];
+      macros = [
+        TerminalMacroItem(
+          id: 'm1',
+          name: 'Git Status',
+          trigger: 'gs',
+          replacement: 'git status',
+        ),
+        TerminalMacroItem(
+          id: 'm2',
+          name: 'Send file',
+          trigger: 'send',
+          replacement: 'scp {1} host:/tmp/',
+          copySecretToClipboard: true,
+          secretValue: 'pass123',
+        ),
+      ];
+    });
+
+    void feedString(String text) {
+      for (int i = 0; i < text.length; i++) {
+        final char = text[i];
+        engine.processInput(
+          data: char,
+          macros: macros,
+          isUsingAltBuffer: false,
+          writeRaw: (bytes) => writtenBytes.add(bytes),
+          onTriggerSecret: (m) => triggeredSecrets.add(m),
+        );
+      }
+    }
+
+    test('triggers ??gs at start of line on space', () {
+      feedString('??gs ');
+      expect(writtenBytes.length, 2);
+      // First is backspaces for '??gs' (4 chars)
+      expect(writtenBytes[0], List.filled(4, 0x7F));
+      // Second is replacement
+      expect(utf8.decode(writtenBytes[1]), 'git status');
+    });
+
+    test('triggers ??gs after whitespace on space', () {
+      feedString('echo hi; ??gs ');
+      expect(writtenBytes.length, 2);
+      expect(writtenBytes[0], List.filled(4, 0x7F));
+      expect(utf8.decode(writtenBytes[1]), 'git status');
+    });
+
+    test('does NOT trigger in middle of token without whitespace boundary (e.g. col::text or a??b)', () {
+      feedString('select col??gs from table\r');
+      // Should not expand or erase
+      expect(writtenBytes, isEmpty);
+      expect(triggeredSecrets, isEmpty);
+    });
+
+    test('interpolates arguments on Enter with ??send', () {
+      feedString('??send mydoc.pdf\r');
+      expect(writtenBytes.length, 2);
+      // Erases '??send mydoc.pdf' (16 chars)
+      expect(writtenBytes[0].length, 16);
+      expect(utf8.decode(writtenBytes[1]), 'scp mydoc.pdf host:/tmp/');
+      expect(triggeredSecrets.length, 1);
+      expect(triggeredSecrets.first.name, 'Send file');
+    });
+
+    test('resets buffer on Ctrl+C', () {
+      feedString('??gs');
+      feedString('\x03'); // Ctrl+C
+      feedString(' ');
+      // Space after Ctrl+C should not expand
+      expect(writtenBytes, isEmpty);
+    });
+
+    test('handles backspace removing initial ?', () {
+      feedString('?');
+      feedString('\x7f'); // backspace
+      feedString('?gs '); // Only one '?' followed by 'gs '
+      expect(writtenBytes, isEmpty);
     });
   });
 }

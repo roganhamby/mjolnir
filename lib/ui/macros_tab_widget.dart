@@ -138,7 +138,7 @@ class _MacrosTabWidgetState extends State<MacrosTabWidget> {
                       ),
                       decoration: InputDecoration(
                         labelText: 'Trigger Pattern',
-                        prefixText: ':: ',
+                        prefixText: '?? ',
                         prefixStyle: TextStyle(
                           color: scheme.accentColor,
                           fontWeight: FontWeight.bold,
@@ -146,7 +146,7 @@ class _MacrosTabWidgetState extends State<MacrosTabWidget> {
                         ),
                         hintText: 'send',
                         hintStyle: TextStyle(color: scheme.mutedText),
-                        helperText: 'Type ::${triggerCtrl.text.isEmpty ? "trigger" : triggerCtrl.text.replaceFirst(RegExp(r"^:+"), "")} in any shell to invoke',
+                        helperText: 'Type ??${triggerCtrl.text.isEmpty ? "trigger" : triggerCtrl.text.replaceFirst(RegExp(r"^[?:]+"), "")} in any shell to invoke',
                         helperStyle: TextStyle(color: scheme.mutedText, fontSize: 11),
                         border: const OutlineInputBorder(),
                         isDense: true,
@@ -262,7 +262,7 @@ class _MacrosTabWidgetState extends State<MacrosTabWidget> {
                     id: existing?.id ?? const Uuid().v4(),
                     name: nameCtrl.text.trim().isNotEmpty
                         ? nameCtrl.text.trim()
-                        : '::${triggerText.replaceFirst(RegExp(r"^:+"), "")}',
+                        : '??${triggerText.replaceFirst(RegExp(r"^[?:]+"), "")}',
                     trigger: triggerText,
                     replacement: replacementText,
                     executeImmediately: executeImmediately,
@@ -353,7 +353,7 @@ class _MacrosTabWidgetState extends State<MacrosTabWidget> {
                           borderRadius: BorderRadius.circular(4),
                         ),
                         child: Text(
-                          'Type ::trigger in any shell',
+                          'Type ??trigger in any shell',
                           style: TextStyle(fontSize: 11, color: scheme.accentColor),
                         ),
                       ),
@@ -439,7 +439,7 @@ class _MacrosTabWidgetState extends State<MacrosTabWidget> {
                       Text(
                         _searchQuery.isNotEmpty
                             ? 'No macros match "$_searchQuery".'
-                            : 'No macros yet. Create a macro above (e.g. ::send) to auto-expand commands and copy passwords!',
+                            : 'No macros yet. Create a macro above (e.g. ??send) to auto-expand commands and copy passwords!',
                         style: TextStyle(color: scheme.mutedText),
                       ),
                       const SizedBox(height: 16),

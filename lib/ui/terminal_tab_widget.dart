@@ -178,7 +178,7 @@ class _TerminalTabWidgetState extends State<TerminalTabWidget>
   int _screenLogBytesWritten = 0;
   bool _ctrlModifierActive = false;
   final RegExp _ansiRegex = RegExp(r'\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])');
-  String _macroLineBuffer = '';
+  final TerminalMacroEngine _macroEngine = TerminalMacroEngine();
   String? _remoteWorkingDirectory;
   List<TerminalMacroItem> get _effectiveMacros =>
       widget.getMacros?.call() ?? widget.macros ?? [];
@@ -2187,134 +2187,20 @@ Total Characters Logged: $_screenLogBytesWritten
   }
 
   bool _processTerminalMacroInput(String data, void Function(List<int> bytes) writeRaw) {
-    // If the terminal is using alt buffer (vim, nano, htop, less), do not intercept
-    if (terminal.isUsingAltBuffer) {
-      _macroLineBuffer = '';
-      return false;
-    }
-
-    // Line resets or interrupts (Ctrl+C, Ctrl+U, Escape)
-    if (data.contains('\x03') || data.contains('\x15') || data.contains('\x1b')) {
-      _macroLineBuffer = '';
-      return false;
-    }
-
-    // Backspace handling (\x7f or \x08)
-    if (data == '\x7f' || data == '\x08') {
-      if (_macroLineBuffer.isNotEmpty) {
-        _macroLineBuffer = _macroLineBuffer.substring(0, _macroLineBuffer.length - 1);
-      }
-      return false;
-    }
-
-    final isEnter = data.contains('\r') || data.contains('\n');
-    final isTab = data == '\t';
-
-    if (isEnter || isTab) {
-      if (_macroLineBuffer.startsWith('::')) {
-        final content = _macroLineBuffer.substring(2).trimLeft();
-        if (content.isNotEmpty) {
-          final spaceIndex = content.indexOf(' ');
-          final triggerWord = (spaceIndex >= 0 ? content.substring(0, spaceIndex) : content).toLowerCase();
-          final rawArgs = spaceIndex >= 0 ? content.substring(spaceIndex + 1).trim() : '';
-
-          final macros = _effectiveMacros;
-          TerminalMacroItem? matchedMacro;
-          for (final m in macros) {
-            if (m.cleanTrigger.toLowerCase() == triggerWord) {
-              matchedMacro = m;
-              break;
-            }
-          }
-
-          if (matchedMacro != null) {
-            final typedLength = _macroLineBuffer.length;
-            final expandedCommand = matchedMacro.interpolate(rawArgs);
-
-            // 1. Send backspaces to erase typed ::trigger args from the shell line
-            writeRaw(List.filled(typedLength, 0x7F));
-
-            // 2. Write the expanded command
-            writeRaw(utf8.encode(expandedCommand));
-
-            // 3. If Enter was pressed and executeImmediately is true, send carriage return
-            if (isEnter && matchedMacro.executeImmediately) {
-              writeRaw(utf8.encode('\r'));
-            }
-
-            // 4. Handle password/secret copy with auto-clear
-            if (matchedMacro.copySecretToClipboard &&
-                matchedMacro.secretValue != null &&
-                matchedMacro.secretValue!.isNotEmpty) {
-              TerminalMacroService.copySecretWithAutoClear(
-                context: context,
-                secret: matchedMacro.secretValue!,
-                macroName: matchedMacro.name,
-                clearSeconds: matchedMacro.autoClearClipboardSeconds,
-              );
-            }
-
-            _macroLineBuffer = '';
-            return true;
-          }
-        }
-      }
-      _macroLineBuffer = '';
-      return false;
-    }
-
-    // Space expansion on macros without parameters
-    if (data == ' ' && _macroLineBuffer.startsWith('::') && !_macroLineBuffer.contains(' ')) {
-      final triggerWord = _macroLineBuffer.substring(2).toLowerCase();
-      final macros = _effectiveMacros;
-      TerminalMacroItem? matchedMacro;
-      for (final m in macros) {
-        if (m.cleanTrigger.toLowerCase() == triggerWord) {
-          matchedMacro = m;
-          break;
-        }
-      }
-
-      if (matchedMacro != null &&
-          !matchedMacro.replacement.contains('{1}') &&
-          !matchedMacro.replacement.contains('{args}') &&
-          !matchedMacro.replacement.contains(RegExp(r'\{file(name)?\}', caseSensitive: false))) {
-        final typedLength = _macroLineBuffer.length;
-        writeRaw(List.filled(typedLength, 0x7F));
-        writeRaw(utf8.encode(matchedMacro.replacement));
-
-        if (matchedMacro.copySecretToClipboard &&
-            matchedMacro.secretValue != null &&
-            matchedMacro.secretValue!.isNotEmpty) {
-          TerminalMacroService.copySecretWithAutoClear(
-            context: context,
-            secret: matchedMacro.secretValue!,
-            macroName: matchedMacro.name,
-            clearSeconds: matchedMacro.autoClearClipboardSeconds,
-          );
-        }
-
-        _macroLineBuffer = '';
-        return true;
-      }
-    }
-
-    // Accumulate printable characters into _macroLineBuffer
-    if (_macroLineBuffer.isEmpty) {
-      if (data == ':') {
-        _macroLineBuffer = ':';
-      }
-    } else if (_macroLineBuffer == ':') {
-      if (data == ':') {
-        _macroLineBuffer = '::';
-      } else {
-        _macroLineBuffer = '';
-      }
-    } else {
-      _macroLineBuffer += data;
-    }
-
-    return false;
+    return _macroEngine.processInput(
+      data: data,
+      macros: _effectiveMacros,
+      isUsingAltBuffer: terminal.isUsingAltBuffer,
+      writeRaw: writeRaw,
+      onTriggerSecret: (matchedMacro) {
+        TerminalMacroService.copySecretWithAutoClear(
+          context: context,
+          secret: matchedMacro.secretValue!,
+          macroName: matchedMacro.name,
+          clearSeconds: matchedMacro.autoClearClipboardSeconds,
+        );
+      },
+    );
   }
 
   Widget _buildMobileAccessoryBar(AppColorScheme scheme) {
