@@ -1457,6 +1457,22 @@ class _TerminalTabWidgetState extends State<TerminalTabWidget>
           ],
         ),
       ),
+      PopupMenuItem<String>(
+        value: 'send_lnext',
+        height: 36,
+        child: Row(
+          children: [
+            const Icon(Icons.keyboard_outlined, size: 16, color: Colors.white),
+            const SizedBox(width: 8),
+            const Text('Send Literal Next (^V)', style: TextStyle(fontSize: 13, color: Colors.white)),
+            const Spacer(),
+            Text(
+              Platform.isMacOS ? 'Ctrl+Q / ⌥⌘V' : 'Ctrl+Q / Ctrl+Alt+V',
+              style: const TextStyle(fontSize: 11, color: Colors.grey),
+            ),
+          ],
+        ),
+      ),
       const PopupMenuDivider(height: 8),
       PopupMenuItem<String>(
         value: 'selectAll',
@@ -1513,6 +1529,11 @@ class _TerminalTabWidgetState extends State<TerminalTabWidget>
       _copySelection();
     } else if (selected == 'paste') {
       _pasteToTerminal();
+    } else if (selected == 'send_lnext') {
+      _sendRawToShell([0x16]);
+      if (mounted) {
+        AppNotification.show(context, message: 'Sent Literal Next (^V) to terminal. Press next key literally.');
+      }
     } else if (selected == 'selectAll') {
       _selectAll();
     } else if (selected == 'clear') {
@@ -1558,11 +1579,23 @@ class _TerminalTabWidgetState extends State<TerminalTabWidget>
       }
 
       // Paste: Cmd+V (macOS) or Ctrl+Shift+V or Ctrl+V
-      if ((isMeta && event.logicalKey == LogicalKeyboardKey.keyV) ||
-          (isCtrl && isShift && event.logicalKey == LogicalKeyboardKey.keyV) ||
-          (isCtrl && event.logicalKey == LogicalKeyboardKey.keyV)) {
+      if ((isMeta && !HardwareKeyboard.instance.isAltPressed && event.logicalKey == LogicalKeyboardKey.keyV) ||
+          (isCtrl && isShift && !HardwareKeyboard.instance.isAltPressed && event.logicalKey == LogicalKeyboardKey.keyV) ||
+          (isCtrl && !HardwareKeyboard.instance.isAltPressed && event.logicalKey == LogicalKeyboardKey.keyV)) {
         if (event is KeyDownEvent) {
           _pasteToTerminal();
+        }
+        return KeyEventResult.handled;
+      }
+
+      // Literal-Next / Quoted-Insert: Ctrl+Q or (Ctrl+Alt+V / Cmd+Alt+V)
+      // Sends ASCII 0x16 (SYN / Ctrl-V / lnext) so the next key (e.g. Ctrl-M or Enter)
+      // is treated literally (such as typing ^M in Vim/Bash).
+      final isAlt = HardwareKeyboard.instance.isAltPressed;
+      if ((isCtrl && !isShift && !isAlt && event.logicalKey == LogicalKeyboardKey.keyQ) ||
+          ((isCtrl || isMeta) && isAlt && event.logicalKey == LogicalKeyboardKey.keyV)) {
+        if (event is KeyDownEvent) {
+          _sendRawToShell([0x16]);
         }
         return KeyEventResult.handled;
       }
@@ -2350,6 +2383,10 @@ Total Characters Logged: $_screenLogBytesWritten
             keyButton(
               'CTRL+C',
               onTap: () => _sendRawToShell([0x03]),
+            ),
+            keyButton(
+              '^V',
+              onTap: () => _sendRawToShell([0x16]),
             ),
             keyButton(
               '↑',

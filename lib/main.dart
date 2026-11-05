@@ -10,7 +10,7 @@ import 'package:intl/intl.dart';
 import 'models/server_config.dart';
 import 'models/task_item.dart';
 import 'models/stored_string_item.dart';
-import 'models/terminal_macro_item.dart';
+import 'models/special_character_item.dart';
 import 'services/local_shell_service.dart';
 import 'services/sftp_sync_service.dart';
 import 'services/sync_storage_provider.dart';
@@ -578,14 +578,30 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
     } else {
       for (final item in items) {
         final hasLabel = item.label.trim().isNotEmpty;
-        final cleanValue = item.value
-            .replaceAll('\r\n', ' ')
-            .replaceAll('\n', ' ')
-            .replaceAll('\t', ' ')
-            .trim();
-        final displayValue = cleanValue.length > 40
-            ? '${cleanValue.substring(0, 40)}...'
-            : cleanValue;
+        final rawVal = item.value;
+        String displayValue;
+        if (rawVal == '\r') {
+          displayValue = '^M (Carriage Return / CR)';
+        } else if (rawVal == '\n') {
+          displayValue = '^J (Line Feed / LF)';
+        } else if (rawVal == '\t') {
+          displayValue = '^I (Tab)';
+        } else if (rawVal == '\x1b') {
+          displayValue = '^[ (Escape / ESC)';
+        } else if (rawVal == '\x16') {
+          displayValue = '^V (Literal Next / LNEXT)';
+        } else if (rawVal == '\x00') {
+          displayValue = '^@ (Null / NUL)';
+        } else {
+          final cleanValue = rawVal
+              .replaceAll('\r\n', ' ')
+              .replaceAll('\n', ' ')
+              .replaceAll('\t', ' ')
+              .trim();
+          displayValue = cleanValue.length > 40
+              ? '${cleanValue.substring(0, 40)}...'
+              : cleanValue;
+        }
 
         menuItems.add(
           PopupMenuItem<String>(
@@ -631,6 +647,48 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
     }
 
     menuItems.add(const PopupMenuDivider());
+
+    // Common Special / Control Characters quick copy entries
+    for (final spec in SpecialCharacterItem.common.take(6)) {
+      menuItems.add(
+        PopupMenuItem<String>(
+          value: '__special_${spec.symbol}__',
+          height: 32,
+          child: Row(
+            children: [
+              Container(
+                padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 2),
+                decoration: BoxDecoration(
+                  color: scheme.accentColor.withAlpha(35),
+                  borderRadius: BorderRadius.circular(4),
+                ),
+                child: Text(
+                  spec.symbol,
+                  style: TextStyle(
+                    fontSize: 11,
+                    fontWeight: FontWeight.bold,
+                    fontFamily: 'monospace',
+                    color: scheme.accentColor,
+                  ),
+                ),
+              ),
+              const SizedBox(width: 8),
+              Text(
+                '${spec.name} (${spec.abbreviation})',
+                style: TextStyle(fontSize: 12, color: scheme.primaryText),
+              ),
+              const Spacer(),
+              Text(
+                spec.hexCode,
+                style: TextStyle(fontSize: 10, color: scheme.mutedText, fontFamily: 'monospace'),
+              ),
+            ],
+          ),
+        ),
+      );
+    }
+
+    menuItems.add(const PopupMenuDivider());
     menuItems.add(
       PopupMenuItem<String>(
         value: '__open_pasteboard_tab__',
@@ -665,6 +723,22 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
 
     if (selectedId == '__open_pasteboard_tab__') {
       _openStoredStringsTab();
+      return;
+    }
+
+    if (selectedId.startsWith('__special_')) {
+      final symbol = selectedId.replaceAll('__special_', '').replaceAll('__', '');
+      final spec = SpecialCharacterItem.common.firstWhere(
+        (s) => s.symbol == symbol,
+        orElse: () => SpecialCharacterItem.common.first,
+      );
+      await Clipboard.setData(ClipboardData(text: spec.value));
+      if (!mounted) return;
+      AppNotification.show(
+        context,
+        message: 'Copied ${spec.symbol} (${spec.name}) to clipboard.',
+        duration: const Duration(seconds: 2),
+      );
       return;
     }
 
