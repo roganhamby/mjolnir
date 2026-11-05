@@ -1,6 +1,8 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'dart:typed_data';
+import 'package:dartssh2/dartssh2.dart';
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
@@ -8,6 +10,7 @@ import 'package:flutter/services.dart';
 import 'package:intl/intl.dart';
 import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
+import 'package:url_launcher/url_launcher.dart';
 import 'package:xterm/xterm.dart';
 import '../models/server_config.dart';
 import '../models/task_item.dart';
@@ -176,6 +179,7 @@ class _TerminalTabWidgetState extends State<TerminalTabWidget>
   bool _ctrlModifierActive = false;
   final RegExp _ansiRegex = RegExp(r'\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])');
   String _macroLineBuffer = '';
+  String? _remoteWorkingDirectory;
   List<TerminalMacroItem> get _effectiveMacros =>
       widget.getMacros?.call() ?? widget.macros ?? [];
 
@@ -702,6 +706,19 @@ class _TerminalTabWidgetState extends State<TerminalTabWidget>
           }
         } catch (_) {}
       }
+    } else if (code == '7' && args.isNotEmpty) {
+      // Support OSC 7 current working directory integration (\x1b]7;file://hostname/path\x07)
+      try {
+        final payload = args.join(';');
+        if (payload.startsWith('file://')) {
+          final uri = Uri.tryParse(payload);
+          if (uri != null && uri.path.isNotEmpty) {
+            _remoteWorkingDirectory = Uri.decodeComponent(uri.path);
+          }
+        } else if (payload.startsWith('/')) {
+          _remoteWorkingDirectory = payload;
+        }
+      } catch (_) {}
     }
   }
 
@@ -827,8 +844,649 @@ class _TerminalTabWidgetState extends State<TerminalTabWidget>
     _requestTerminalFocus();
   }
 
+  String? _detectUrlAt(Offset globalPos) {
+    if (_terminalController.selection != null) {
+      final selectedText = _extractSelectedText(_terminalController.selection!).trim();
+      final urlMatch = RegExp(r'''^https?://[^\s<>"'\]\[\(\)]+''').firstMatch(selectedText);
+      if (urlMatch != null) {
+        return _cleanUrl(urlMatch.group(0)!);
+      }
+    }
+
+    final viewState = _terminalViewKey.currentState;
+    if (viewState == null || terminal.buffer.lines.length == 0) return null;
+
+    try {
+      _repairDetachedBufferLines();
+      final render = viewState.renderTerminal;
+      final localPos = render.globalToLocal(globalPos);
+      final cell = render.getCellOffset(localPos);
+      if (cell.y < 0 || cell.y >= terminal.buffer.lines.length) return null;
+
+      var startLineIdx = cell.y;
+      while (startLineIdx > 0 && terminal.buffer.lines[startLineIdx - 1].isWrapped) {
+        startLineIdx--;
+      }
+      var endLineIdx = cell.y;
+      while (endLineIdx < terminal.buffer.lines.length - 1 && terminal.buffer.lines[endLineIdx].isWrapped) {
+        endLineIdx++;
+      }
+
+      final buffer = StringBuffer();
+      var clickedCharIndex = -1;
+      var curOffset = 0;
+
+      for (var lIdx = startLineIdx; lIdx <= endLineIdx; lIdx++) {
+        final line = terminal.buffer.lines[lIdx];
+        final lineStr = line.toString();
+        if (lIdx == cell.y) {
+          clickedCharIndex = curOffset + cell.x.clamp(0, lineStr.length);
+        }
+        buffer.write(lineStr);
+        curOffset += lineStr.length;
+      }
+
+      final fullText = buffer.toString();
+      final urlRegex = RegExp(r'''https?://[^\s<>"'\]\[\(\)]+''');
+      for (final match in urlRegex.allMatches(fullText)) {
+        if (clickedCharIndex >= match.start && clickedCharIndex <= match.end) {
+          return _cleanUrl(match.group(0)!);
+        }
+      }
+
+      final boundary = terminal.buffer.getWordBoundary(cell);
+      if (boundary != null) {
+        final word = _extractSelectedText(BufferRangeLine(boundary.begin, boundary.end)).trim();
+        final match = urlRegex.firstMatch(word);
+        if (match != null) {
+          return _cleanUrl(match.group(0)!);
+        }
+      }
+    } catch (_) {}
+
+    return null;
+  }
+
+  String _cleanUrl(String raw) {
+    var url = raw.trim();
+    while (url.isNotEmpty &&
+        (url.startsWith('(') || url.startsWith('<') || url.startsWith('['))) {
+      url = url.substring(1);
+    }
+    while (url.isNotEmpty &&
+        (url.endsWith('.') ||
+            url.endsWith(',') ||
+            url.endsWith(';') ||
+            url.endsWith(')') ||
+            url.endsWith(']') ||
+            url.endsWith('>'))) {
+      url = url.substring(0, url.length - 1);
+    }
+    return url;
+  }
+
+  String? _detectFilePathAt(Offset globalPos) {
+    if (_terminalController.selection != null) {
+      final selectedText = _extractSelectedText(_terminalController.selection!).trim();
+      if (_isValidFilePathCandidate(selectedText, isSelected: true)) {
+        return _cleanFilePath(selectedText);
+      }
+    }
+
+    final viewState = _terminalViewKey.currentState;
+    if (viewState == null || terminal.buffer.lines.length == 0) return null;
+
+    try {
+      _repairDetachedBufferLines();
+      final render = viewState.renderTerminal;
+      final localPos = render.globalToLocal(globalPos);
+      final cell = render.getCellOffset(localPos);
+      if (cell.y < 0 || cell.y >= terminal.buffer.lines.length) return null;
+
+      final line = terminal.buffer.lines[cell.y];
+      final lineStr = line.toString();
+      if (lineStr.isEmpty || cell.x < 0) return null;
+
+      final clickX = cell.x.clamp(0, lineStr.length - 1);
+      if (lineStr[clickX].trim().isEmpty) return null;
+
+      var start = clickX;
+      while (start > 0 && !_isPathDelimiter(lineStr[start - 1])) {
+        start--;
+      }
+      var end = clickX;
+      while (end < lineStr.length && !_isPathDelimiter(lineStr[end])) {
+        end++;
+      }
+
+      final token = lineStr.substring(start, end);
+      final cleaned = _cleanFilePath(token);
+      if (_isValidFilePathCandidate(cleaned, isSelected: false)) {
+        return cleaned;
+      }
+    } catch (_) {}
+
+    return null;
+  }
+
+  bool _isPathDelimiter(String ch) {
+    return ch == ' ' ||
+        ch == '\t' ||
+        ch == '\r' ||
+        ch == '\n' ||
+        ch == '"' ||
+        ch == '\'' ||
+        ch == '`' ||
+        ch == '<' ||
+        ch == '>' ||
+        ch == '[' ||
+        ch == ']' ||
+        ch == '(' ||
+        ch == ')';
+  }
+
+  String _cleanFilePath(String raw) {
+    var path = raw.trim();
+    if ((path.startsWith('"') && path.endsWith('"')) ||
+        (path.startsWith("'") && path.endsWith("'")) ||
+        (path.startsWith('`') && path.endsWith('`'))) {
+      path = path.substring(1, path.length - 1).trim();
+    }
+    while (path.isNotEmpty &&
+        (path.endsWith(':') ||
+            path.endsWith(',') ||
+            path.endsWith(';') ||
+            path.endsWith(')') ||
+            path.endsWith(']'))) {
+      path = path.substring(0, path.length - 1);
+    }
+    while (path.isNotEmpty && (path.startsWith('(') || path.startsWith('['))) {
+      path = path.substring(1);
+    }
+    return path.trim();
+  }
+
+  bool _isValidFilePathCandidate(String s, {bool isSelected = false}) {
+    if (s.isEmpty || s.length > 1024) return false;
+    if (s.startsWith('http://') || s.startsWith('https://')) return false;
+    if (s.contains('\n') || s.contains('\r') || s.contains('\x00')) return false;
+    if (s.startsWith('-')) return false;
+    if (RegExp(r'^[-rwxstldcbp]{9,10}$').hasMatch(s)) return false;
+    if (RegExp(r'^\d+$').hasMatch(s)) return false;
+    if (s == '.' || s == '..' || s == '/' || s == '~') return false;
+
+    if (isSelected) {
+      return !s.contains(' ') && !s.contains('\t');
+    }
+
+    final hasExtension = RegExp(r'\.[a-zA-Z0-9_-]{1,16}$').hasMatch(s);
+    final isPath = s.contains('/') || s.startsWith('~/');
+    final isHiddenFile = s.startsWith('.') && s.length > 1;
+
+    return hasExtension || isPath || isHiddenFile;
+  }
+
+  Future<void> _openUrlInBrowser(String urlString) async {
+    try {
+      final uri = Uri.parse(urlString);
+      final launched = await launchUrl(
+        uri,
+        mode: LaunchMode.externalApplication,
+      );
+      if (!launched && mounted) {
+        AppNotification.error(
+          context,
+          'Could not open URL in outside browser: $urlString',
+        );
+      }
+    } catch (e) {
+      if (mounted) {
+        AppNotification.error(context, 'Failed to launch URL: $e');
+      }
+    } finally {
+      _requestTerminalFocus();
+    }
+  }
+
+  Future<void> _showSftpDownloadDialog(String candidatePath) async {
+    if (_sshSession == null || _isDisconnected) {
+      AppNotification.error(
+        context,
+        'Cannot download via SFTP: SSH session is not connected.',
+      );
+      _requestTerminalFocus();
+      return;
+    }
+
+    var initialPath = candidatePath;
+    if (!initialPath.startsWith('/') && !initialPath.startsWith('~')) {
+      if (_remoteWorkingDirectory != null && _remoteWorkingDirectory!.isNotEmpty) {
+        initialPath = p.posix.join(_remoteWorkingDirectory!, candidatePath);
+      }
+    }
+
+    final pathController = TextEditingController(text: initialPath);
+
+    final action = await showDialog<String>(
+      context: context,
+      barrierDismissible: true,
+      builder: (dialogCtx) {
+        return AlertDialog(
+          backgroundColor: const Color(0xFF252526),
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(8),
+            side: const BorderSide(color: Color(0xFF3E3E42)),
+          ),
+          title: Row(
+            children: [
+              const Icon(Icons.cloud_download, color: Colors.greenAccent, size: 20),
+              const SizedBox(width: 8),
+              const Text(
+                'Download via SFTP',
+                style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold, color: Colors.white),
+              ),
+            ],
+          ),
+          content: SizedBox(
+            width: 480,
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  'Server: ${widget.server.name.isNotEmpty ? widget.server.name : widget.server.host}',
+                  style: const TextStyle(fontSize: 12, color: Colors.grey),
+                ),
+                const SizedBox(height: 12),
+                const Text(
+                  'Remote File Path:',
+                  style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: Colors.white70),
+                ),
+                const SizedBox(height: 6),
+                TextField(
+                  controller: pathController,
+                  autofocus: true,
+                  style: const TextStyle(fontSize: 13, color: Colors.white, fontFamily: 'monospace'),
+                  decoration: InputDecoration(
+                    hintText: '/path/to/remote/file',
+                    hintStyle: const TextStyle(color: Colors.grey),
+                    isDense: true,
+                    contentPadding: const EdgeInsets.symmetric(horizontal: 10, vertical: 10),
+                    filled: true,
+                    fillColor: const Color(0xFF1E1E1E),
+                    enabledBorder: OutlineInputBorder(
+                      borderSide: const BorderSide(color: Color(0xFF3E3E42)),
+                      borderRadius: BorderRadius.circular(4),
+                    ),
+                    focusedBorder: OutlineInputBorder(
+                      borderSide: const BorderSide(color: Colors.greenAccent),
+                      borderRadius: BorderRadius.circular(4),
+                    ),
+                  ),
+                ),
+                const SizedBox(height: 8),
+                const Text(
+                  'Relative paths resolve against your remote home (~). Provide the full absolute path if the file is in another directory.',
+                  style: TextStyle(fontSize: 11, color: Colors.grey),
+                ),
+              ],
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(dialogCtx).pop(null),
+              child: const Text('Cancel', style: TextStyle(color: Colors.grey)),
+            ),
+            OutlinedButton.icon(
+              icon: const Icon(Icons.save_as, size: 16, color: Colors.white70),
+              label: const Text('Save As...', style: TextStyle(color: Colors.white)),
+              style: OutlinedButton.styleFrom(
+                side: const BorderSide(color: Color(0xFF3E3E42)),
+              ),
+              onPressed: () {
+                final text = pathController.text.trim();
+                if (text.isNotEmpty) {
+                  Navigator.of(dialogCtx).pop('save_as:$text');
+                }
+              },
+            ),
+            ElevatedButton.icon(
+              icon: const Icon(Icons.download, size: 16, color: Colors.black),
+              label: const Text('Download', style: TextStyle(color: Colors.black, fontWeight: FontWeight.bold)),
+              style: ElevatedButton.styleFrom(
+                backgroundColor: Colors.greenAccent,
+              ),
+              onPressed: () {
+                final text = pathController.text.trim();
+                if (text.isNotEmpty) {
+                  Navigator.of(dialogCtx).pop('downloads:$text');
+                }
+              },
+            ),
+          ],
+        );
+      },
+    );
+
+    _requestTerminalFocus();
+
+    if (action == null) return;
+
+    final parts = action.split(':');
+    final mode = parts.first;
+    final remotePath = action.substring(mode.length + 1);
+
+    await _executeSftpDownload(
+      remotePath: remotePath,
+      useSaveAs: mode == 'save_as',
+    );
+  }
+
+  Future<void> _executeSftpDownload({
+    required String remotePath,
+    required bool useSaveAs,
+  }) async {
+    if (_sshSession == null || _isDisconnected) {
+      if (mounted) {
+        AppNotification.error(context, 'SSH session disconnected.');
+      }
+      return;
+    }
+
+    final rawName = p.posix.basename(remotePath.trim());
+    final fileName = rawName.isNotEmpty ? rawName : 'downloaded_file';
+
+    if (mounted) {
+      AppNotification.show(
+        context,
+        message: 'Connecting to SFTP for "$fileName"...',
+        duration: const Duration(seconds: 2),
+      );
+    }
+
+    SftpClient? sftp;
+    bool ownClient = false;
+    try {
+      if (_sshSession != null && !_isDisconnected) {
+        try {
+          sftp = await _sshSession!.client.sftp();
+        } catch (_) {}
+      }
+      if (sftp == null) {
+        final session = await widget.sshService.startSftpSession(widget.server);
+        sftp = session.sftp;
+        ownClient = true;
+      }
+
+      String homePath = widget.server.username == 'root'
+          ? '/root'
+          : '/home/${widget.server.username}';
+      try {
+        final realHome = await sftp.absolute('.');
+        if (realHome.trim().isNotEmpty) {
+          homePath = realHome.trim();
+        }
+      } catch (_) {}
+
+      final resolvedRemotePath = SshService.resolveRemotePath(
+        remotePath,
+        homePath: homePath,
+      );
+
+      SftpFileAttrs stat;
+      try {
+        stat = await sftp.stat(resolvedRemotePath);
+      } catch (e) {
+        if (mounted) {
+          AppNotification.error(
+            context,
+            'Remote file not found at "$resolvedRemotePath"',
+          );
+        }
+        return;
+      }
+
+      if (stat.isDirectory) {
+        if (mounted) {
+          AppNotification.error(
+            context,
+            '"$resolvedRemotePath" is a directory. Please use the SFTP tab to transfer folders.',
+          );
+        }
+        return;
+      }
+
+      if (mounted) {
+        AppNotification.show(
+          context,
+          message: 'Downloading "$fileName"...',
+          duration: const Duration(seconds: 3),
+        );
+      }
+
+      if (useSaveAs) {
+        final remoteFile = await sftp.open(resolvedRemotePath);
+        final builder = BytesBuilder();
+        try {
+          await for (final chunk in remoteFile.read()) {
+            builder.add(chunk);
+          }
+        } finally {
+          await remoteFile.close();
+        }
+
+        final bytes = builder.takeBytes();
+        final savedUri = await FilePicker.saveFile(
+          dialogTitle: 'Save File To...',
+          fileName: fileName,
+          bytes: bytes,
+        );
+
+        if (savedUri != null && mounted) {
+          AppNotification.success(
+            context,
+            'Downloaded "$fileName" successfully.',
+          );
+        }
+      } else {
+        Directory? downloadsDir;
+        try {
+          downloadsDir = await getDownloadsDirectory();
+        } catch (_) {}
+
+        if (downloadsDir == null) {
+          final home = Platform.environment['HOME'] ?? Platform.environment['USERPROFILE'];
+          if (home != null && home.isNotEmpty) {
+            final candidate = Directory(p.join(home, 'Downloads'));
+            if (await candidate.exists()) {
+              downloadsDir = candidate;
+            } else {
+              downloadsDir = Directory(home);
+            }
+          }
+        }
+
+        downloadsDir ??= await getApplicationDocumentsDirectory();
+
+        final localPath = p.join(downloadsDir.path, fileName);
+        final localFile = File(localPath);
+        final raf = await localFile.open(mode: FileMode.write);
+        final remoteFile = await sftp.open(resolvedRemotePath);
+        try {
+          await for (final chunk in remoteFile.read()) {
+            await raf.writeFrom(chunk);
+          }
+        } finally {
+          await raf.close();
+          await remoteFile.close();
+        }
+
+        if (mounted) {
+          AppNotification.success(
+            context,
+            'Saved "$fileName" to ${downloadsDir.path}',
+          );
+        }
+      }
+    } catch (e) {
+      if (mounted) {
+        AppNotification.error(context, 'SFTP download error: $e');
+      }
+    } finally {
+      if (ownClient && sftp != null) {
+        try {
+          sftp.close();
+        } catch (_) {}
+      }
+      _requestTerminalFocus();
+    }
+  }
+
   Future<void> _showContextMenu(Offset position) async {
     final hasSelection = _terminalController.selection != null;
+    final detectedUrl = _detectUrlAt(position);
+    final detectedFilePath = !widget.isLocalShell ? _detectFilePathAt(position) : null;
+
+    final items = <PopupMenuEntry<String>>[];
+
+    if (detectedUrl != null) {
+      var displayUrl = detectedUrl;
+      if (displayUrl.length > 40) {
+        displayUrl = '${displayUrl.substring(0, 37)}...';
+      }
+      items.add(
+        PopupMenuItem<String>(
+          value: 'open_url',
+          height: 36,
+          child: Row(
+            children: [
+              const Icon(Icons.open_in_browser, size: 16, color: Colors.lightBlueAccent),
+              const SizedBox(width: 8),
+              Expanded(
+                child: Text(
+                  'Open in Browser ($displayUrl)',
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(fontSize: 13, color: Colors.lightBlueAccent),
+                ),
+              ),
+            ],
+          ),
+        ),
+      );
+      items.add(
+        PopupMenuItem<String>(
+          value: 'copy_url',
+          height: 36,
+          child: const Row(
+            children: [
+              Icon(Icons.link, size: 16, color: Colors.white70),
+              SizedBox(width: 8),
+              Text('Copy URL', style: TextStyle(fontSize: 13, color: Colors.white)),
+            ],
+          ),
+        ),
+      );
+      items.add(const PopupMenuDivider(height: 8));
+    }
+
+    if (detectedFilePath != null) {
+      var displayFile = p.posix.basename(detectedFilePath);
+      if (displayFile.isEmpty) displayFile = detectedFilePath;
+      if (displayFile.length > 30) {
+        displayFile = '${displayFile.substring(0, 27)}...';
+      }
+      items.add(
+        PopupMenuItem<String>(
+          value: 'download_sftp',
+          height: 36,
+          child: Row(
+            children: [
+              const Icon(Icons.download, size: 16, color: Colors.greenAccent),
+              const SizedBox(width: 8),
+              Expanded(
+                child: Text(
+                  'Download "$displayFile" via SFTP...',
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(fontSize: 13, color: Colors.greenAccent),
+                ),
+              ),
+            ],
+          ),
+        ),
+      );
+      items.add(const PopupMenuDivider(height: 8));
+    }
+
+    items.addAll([
+      PopupMenuItem<String>(
+        value: 'copy',
+        enabled: hasSelection,
+        height: 36,
+        child: Row(
+          children: [
+            Icon(Icons.copy, size: 16, color: hasSelection ? Colors.white : Colors.grey),
+            const SizedBox(width: 8),
+            Text(
+              'Copy',
+              style: TextStyle(
+                fontSize: 13,
+                color: hasSelection ? Colors.white : Colors.grey,
+              ),
+            ),
+            const Spacer(),
+            Text(
+              Platform.isMacOS ? '⌘C' : 'Ctrl+Shift+C',
+              style: const TextStyle(fontSize: 11, color: Colors.grey),
+            ),
+          ],
+        ),
+      ),
+      PopupMenuItem<String>(
+        value: 'paste',
+        height: 36,
+        child: Row(
+          children: [
+            const Icon(Icons.paste, size: 16, color: Colors.white),
+            const SizedBox(width: 8),
+            const Text('Paste', style: TextStyle(fontSize: 13, color: Colors.white)),
+            const Spacer(),
+            Text(
+              Platform.isMacOS ? '⌘V' : 'Ctrl+V',
+              style: const TextStyle(fontSize: 11, color: Colors.grey),
+            ),
+          ],
+        ),
+      ),
+      const PopupMenuDivider(height: 8),
+      PopupMenuItem<String>(
+        value: 'selectAll',
+        height: 36,
+        child: Row(
+          children: [
+            const Icon(Icons.select_all, size: 16, color: Colors.white),
+            const SizedBox(width: 8),
+            const Text('Select All', style: TextStyle(fontSize: 13, color: Colors.white)),
+            const Spacer(),
+            Text(
+              Platform.isMacOS ? '⌘A' : 'Ctrl+Shift+A',
+              style: const TextStyle(fontSize: 11, color: Colors.grey),
+            ),
+          ],
+        ),
+      ),
+      PopupMenuItem<String>(
+        value: 'clear',
+        height: 36,
+        child: Row(
+          children: [
+            Icon(Icons.clear_all, size: 16, color: Colors.white),
+            SizedBox(width: 8),
+            Text('Clear Screen', style: TextStyle(fontSize: 13, color: Colors.white)),
+          ],
+        ),
+      ),
+    ]);
+
     final selected = await showMenu<String>(
       context: context,
       position: RelativeRect.fromLTRB(
@@ -838,78 +1496,20 @@ class _TerminalTabWidgetState extends State<TerminalTabWidget>
         position.dy + 1,
       ),
       color: const Color(0xFF2D2D2D),
-      items: [
-        PopupMenuItem<String>(
-          value: 'copy',
-          enabled: hasSelection,
-          height: 36,
-          child: Row(
-            children: [
-              Icon(Icons.copy, size: 16, color: hasSelection ? Colors.white : Colors.grey),
-              const SizedBox(width: 8),
-              Text(
-                'Copy',
-                style: TextStyle(
-                  fontSize: 13,
-                  color: hasSelection ? Colors.white : Colors.grey,
-                ),
-              ),
-              const Spacer(),
-              Text(
-                Platform.isMacOS ? '⌘C' : 'Ctrl+Shift+C',
-                style: const TextStyle(fontSize: 11, color: Colors.grey),
-              ),
-            ],
-          ),
-        ),
-        PopupMenuItem<String>(
-          value: 'paste',
-          height: 36,
-          child: Row(
-            children: [
-              const Icon(Icons.paste, size: 16, color: Colors.white),
-              const SizedBox(width: 8),
-              const Text('Paste', style: TextStyle(fontSize: 13, color: Colors.white)),
-              const Spacer(),
-              Text(
-                Platform.isMacOS ? '⌘V' : 'Ctrl+V',
-                style: const TextStyle(fontSize: 11, color: Colors.grey),
-              ),
-            ],
-          ),
-        ),
-        const PopupMenuDivider(height: 8),
-        PopupMenuItem<String>(
-          value: 'selectAll',
-          height: 36,
-          child: Row(
-            children: [
-              const Icon(Icons.select_all, size: 16, color: Colors.white),
-              const SizedBox(width: 8),
-              const Text('Select All', style: TextStyle(fontSize: 13, color: Colors.white)),
-              const Spacer(),
-              Text(
-                Platform.isMacOS ? '⌘A' : 'Ctrl+Shift+A',
-                style: const TextStyle(fontSize: 11, color: Colors.grey),
-              ),
-            ],
-          ),
-        ),
-        const PopupMenuItem<String>(
-          value: 'clear',
-          height: 36,
-          child: Row(
-            children: [
-              Icon(Icons.clear_all, size: 16, color: Colors.white),
-              SizedBox(width: 8),
-              Text('Clear Screen', style: TextStyle(fontSize: 13, color: Colors.white)),
-            ],
-          ),
-        ),
-      ],
+      items: items,
     );
 
-    if (selected == 'copy') {
+    if (selected == 'open_url' && detectedUrl != null) {
+      _openUrlInBrowser(detectedUrl);
+    } else if (selected == 'copy_url' && detectedUrl != null) {
+      Clipboard.setData(ClipboardData(text: detectedUrl));
+      if (mounted) {
+        AppNotification.show(context, message: 'URL copied to clipboard');
+      }
+      _requestTerminalFocus();
+    } else if (selected == 'download_sftp' && detectedFilePath != null) {
+      _showSftpDownloadDialog(detectedFilePath);
+    } else if (selected == 'copy') {
       _copySelection();
     } else if (selected == 'paste') {
       _pasteToTerminal();

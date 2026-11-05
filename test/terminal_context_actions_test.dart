@@ -1,0 +1,141 @@
+import 'package:flutter_test/flutter_test.dart';
+import 'package:mjolnir/services/ssh_service.dart';
+
+void main() {
+  group('Terminal Context Actions - URL and File Detection', () {
+    String cleanUrl(String raw) {
+      var url = raw.trim();
+      while (url.isNotEmpty &&
+          (url.startsWith('(') || url.startsWith('<') || url.startsWith('['))) {
+        url = url.substring(1);
+      }
+      while (url.isNotEmpty &&
+          (url.endsWith('.') ||
+              url.endsWith(',') ||
+              url.endsWith(';') ||
+              url.endsWith(')') ||
+              url.endsWith(']') ||
+              url.endsWith('>'))) {
+        url = url.substring(0, url.length - 1);
+      }
+      return url;
+    }
+
+    String cleanFilePath(String raw) {
+      var path = raw.trim();
+      if ((path.startsWith('"') && path.endsWith('"')) ||
+          (path.startsWith("'") && path.endsWith("'")) ||
+          (path.startsWith('`') && path.endsWith('`'))) {
+        path = path.substring(1, path.length - 1).trim();
+      }
+      while (path.isNotEmpty &&
+          (path.endsWith(':') ||
+              path.endsWith(',') ||
+              urlEndsWith(path, ';') ||
+              path.endsWith(')') ||
+              path.endsWith(']'))) {
+        path = path.substring(0, path.length - 1);
+      }
+      while (path.isNotEmpty && (path.startsWith('(') || path.startsWith('['))) {
+        path = path.substring(1);
+      }
+      return path.trim();
+    }
+
+    bool isValidFilePathCandidate(String s, {bool isSelected = false}) {
+      if (s.isEmpty || s.length > 1024) return false;
+      if (s.startsWith('http://') || s.startsWith('https://')) return false;
+      if (s.contains('\n') || s.contains('\r') || s.contains('\x00')) return false;
+      if (s.startsWith('-')) return false;
+      if (RegExp(r'^[-rwxstldcbp]{9,10}$').hasMatch(s)) return false;
+      if (RegExp(r'^\d+$').hasMatch(s)) return false;
+      if (s == '.' || s == '..' || s == '/' || s == '~') return false;
+
+      if (isSelected) {
+        return !s.contains(' ') && !s.contains('\t');
+      }
+
+      final hasExtension = RegExp(r'\.[a-zA-Z0-9_-]{1,16}$').hasMatch(s);
+      final isPath = s.contains('/') || s.startsWith('~/');
+      final isHiddenFile = s.startsWith('.') && s.length > 1;
+
+      return hasExtension || isPath || isHiddenFile;
+    }
+
+    test('cleanUrl trims trailing punctuation properly', () {
+      expect(cleanUrl('https://example.com/api.'), 'https://example.com/api');
+      expect(cleanUrl('(https://google.com/search?q=flutter)'), 'https://google.com/search?q=flutter');
+      expect(cleanUrl('http://192.168.1.1:8080/metrics;'), 'http://192.168.1.1:8080/metrics');
+      expect(cleanUrl('<https://github.com/flutter/flutter>'), 'https://github.com/flutter/flutter');
+    });
+
+    test('URL regex accurately extracts URLs from terminal text lines', () {
+      final line = 'See docs at https://flutter.dev/get-started and enjoy!';
+      final regex = RegExp(r'''https?://[^\s<>"'\]\[\(\)]+''');
+      final match = regex.firstMatch(line);
+      expect(match, isNotNull);
+      expect(match!.group(0), 'https://flutter.dev/get-started');
+    });
+
+    test('cleanFilePath removes quotes, surrounding brackets, and trailing colons', () {
+      expect(cleanFilePath('"server.log"'), 'server.log');
+      expect(cleanFilePath("'config.yaml'"), 'config.yaml');
+      expect(cleanFilePath('`main.dart`'), 'main.dart');
+      expect(cleanFilePath('/var/log/syslog:'), '/var/log/syslog');
+      expect(cleanFilePath('(/etc/nginx/nginx.conf)'), '/etc/nginx/nginx.conf');
+    });
+
+    test('isValidFilePathCandidate identifies valid files and filters out non-files', () {
+      // Valid file candidates
+      expect(isValidFilePathCandidate('index.html'), isTrue);
+      expect(isValidFilePathCandidate('/etc/hosts'), isTrue);
+      expect(isValidFilePathCandidate('~/data/export.csv'), isTrue);
+      expect(isValidFilePathCandidate('.bashrc'), isTrue);
+      expect(isValidFilePathCandidate('app.tar.gz'), isTrue);
+      expect(isValidFilePathCandidate('src/main.dart'), isTrue);
+
+      // Invalid candidates (should NOT trigger file download)
+      expect(isValidFilePathCandidate('https://example.com/file.txt'), isFalse);
+      expect(isValidFilePathCandidate('-lah'), isFalse);
+      expect(isValidFilePathCandidate('--verbose'), isFalse);
+      expect(isValidFilePathCandidate('-rw-r--r--'), isFalse);
+      expect(isValidFilePathCandidate('drwxr-xr-x'), isFalse);
+      expect(isValidFilePathCandidate('4096'), isFalse);
+      expect(isValidFilePathCandidate('.'), isFalse);
+      expect(isValidFilePathCandidate('..'), isFalse);
+      expect(isValidFilePathCandidate('/'), isFalse);
+      expect(isValidFilePathCandidate('~'), isFalse);
+    });
+
+    test('Selected text allows file names without extension', () {
+      expect(isValidFilePathCandidate('README', isSelected: true), isTrue);
+      expect(isValidFilePathCandidate('LICENSE', isSelected: true), isTrue);
+      expect(isValidFilePathCandidate('Dockerfile', isSelected: true), isTrue);
+      expect(isValidFilePathCandidate('random command with spaces', isSelected: true), isFalse);
+    });
+
+    test('SFTP remote path resolution handles tilde, relative, and absolute paths', () {
+      expect(
+        SshService.resolveRemotePath('config.yaml', homePath: '/home/ubuntu'),
+        '/home/ubuntu/config.yaml',
+      );
+      expect(
+        SshService.resolveRemotePath('/var/log/syslog', homePath: '/root'),
+        '/var/log/syslog',
+      );
+      expect(
+        SshService.resolveRemotePath('~/test.txt', homePath: '/home/deploy'),
+        '/home/deploy/test.txt',
+      );
+    });
+
+    test('OSC 7 URI parsing correctly parses directory path', () {
+      final osc7Payload = 'file://my-server.local/home/user/projects/mjolnir';
+      final uri = Uri.tryParse(osc7Payload);
+      expect(uri, isNotNull);
+      expect(Uri.decodeComponent(uri!.path), '/home/user/projects/mjolnir');
+    });
+  });
+}
+
+bool urlEndsWith(String str, String char) => str.endsWith(char);
