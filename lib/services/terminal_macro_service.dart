@@ -320,7 +320,11 @@ class TerminalMacroEngine {
           !matchedMacro.replacement.contains(RegExp(r'\{file(name)?\}', caseSensitive: false))) {
         final typedLength = _macroLineBuffer.length;
         writeRaw(List.filled(typedLength, 0x7F));
-        writeRaw(utf8.encode(matchedMacro.replacement));
+        // Re-emit the space the user typed: this keystroke is consumed, so without it
+        // any following arguments get glued onto the replacement
+        // (e.g. "??get ITS*" -> "get-thingITS*" -> "command not found").
+        final expanded = '${matchedMacro.replacement} ';
+        writeRaw(utf8.encode(expanded));
 
         if (matchedMacro.copySecretToClipboard &&
             matchedMacro.secretValue != null &&
@@ -329,7 +333,7 @@ class TerminalMacroEngine {
         }
 
         _macroLineBuffer = '';
-        _inputLineTracker = matchedMacro.replacement;
+        _inputLineTracker = expanded;
         return true;
       }
     }

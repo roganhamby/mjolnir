@@ -352,14 +352,47 @@ void main() {
       // First is backspaces for '??gs' (4 chars)
       expect(writtenBytes[0], List.filled(4, 0x7F));
       // Second is replacement
-      expect(utf8.decode(writtenBytes[1]), 'git status');
+      expect(utf8.decode(writtenBytes[1]), 'git status ');
     });
 
     test('triggers ??gs after whitespace on space', () {
       feedString('echo hi; ??gs ');
       expect(writtenBytes.length, 2);
       expect(writtenBytes[0], List.filled(4, 0x7F));
-      expect(utf8.decode(writtenBytes[1]), 'git status');
+      expect(utf8.decode(writtenBytes[1]), 'git status ');
+    });
+
+    test('keeps the space between a no-placeholder macro and typed arguments', () {
+      // Simulate the shell line: apply backspaces / text the engine forwards.
+      final shellLine = StringBuffer();
+      for (final ch in '??gs ITS*'.split('')) {
+        final before = writtenBytes.length;
+        final handled = engine.processInput(
+          data: ch,
+          macros: macros,
+          isUsingAltBuffer: false,
+          writeRaw: (bytes) => writtenBytes.add(bytes),
+          onTriggerSecret: (m) => triggeredSecrets.add(m),
+        );
+        if (!handled) {
+          shellLine.write(ch);
+          continue;
+        }
+        for (final bytes in writtenBytes.sublist(before)) {
+          var s = shellLine.toString();
+          for (final b in bytes) {
+            if (b == 0x7F) {
+              s = s.isEmpty ? s : s.substring(0, s.length - 1);
+            } else {
+              s += String.fromCharCode(b);
+            }
+          }
+          shellLine
+            ..clear()
+            ..write(s);
+        }
+      }
+      expect(shellLine.toString(), 'git status ITS*');
     });
 
     test('does NOT trigger in middle of token without whitespace boundary (e.g. col::text or a??b)', () {
