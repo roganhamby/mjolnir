@@ -2191,20 +2191,70 @@ Total Characters Logged: $_screenLogBytesWritten
   }
 
   bool _processTerminalMacroInput(String data, void Function(List<int> bytes) writeRaw) {
-    return _macroEngine.processInput(
+    void onTriggerSecret(TerminalMacroItem matchedMacro) {
+      TerminalMacroService.copySecretWithAutoClear(
+        context: context,
+        secret: matchedMacro.secretValue!,
+        macroName: matchedMacro.name,
+        clearSeconds: matchedMacro.autoClearClipboardSeconds,
+      );
+    }
+
+    final macros = _effectiveMacros;
+    if (_macroEngine.processInput(
       data: data,
-      macros: _effectiveMacros,
+      macros: macros,
       isUsingAltBuffer: terminal.isUsingAltBuffer,
       writeRaw: writeRaw,
-      onTriggerSecret: (matchedMacro) {
-        TerminalMacroService.copySecretWithAutoClear(
-          context: context,
-          secret: matchedMacro.secretValue!,
-          macroName: matchedMacro.name,
-          clearSeconds: matchedMacro.autoClearClipboardSeconds,
+      onTriggerSecret: onTriggerSecret,
+    )) {
+      return true;
+    }
+
+    // Keystroke tracking can't follow history recall, pastes or cursor edits. On a
+    // plain Enter, fall back to the ??macro text actually displayed on the line.
+    if (macros.isNotEmpty &&
+        !terminal.isUsingAltBuffer &&
+        (data == '\r' || data == '\n' || data == '\r\n')) {
+      final line = _readCursorLogicalLine();
+      if (line != null) {
+        return _macroEngine.expandFromScreenLine(
+          lineText: line.text,
+          cursorOffset: line.cursorOffset,
+          macros: macros,
+          writeRaw: writeRaw,
+          onTriggerSecret: onTriggerSecret,
         );
-      },
-    );
+      }
+    }
+    return false;
+  }
+
+  /// Returns the logical line under the cursor (wrapped rows joined) and the
+  /// cursor's character offset within it.
+  ({String text, int cursorOffset})? _readCursorLogicalLine() {
+    try {
+      final buffer = terminal.buffer;
+      final cursorRow = buffer.absoluteCursorY;
+      if (cursorRow < 0 || cursorRow >= buffer.lines.length) return null;
+
+      var startRow = cursorRow;
+      // isWrapped marks a row that continues the previous one.
+      while (startRow > 0 && buffer.lines[startRow].isWrapped) {
+        startRow--;
+      }
+
+      final width = terminal.viewWidth;
+      final text = StringBuffer();
+      for (var row = startRow; row < cursorRow; row++) {
+        text.write(buffer.lines[row].toString().padRight(width));
+      }
+      final cursorOffset = text.length + buffer.cursorX;
+      text.write(buffer.lines[cursorRow].toString());
+      return (text: text.toString(), cursorOffset: cursorOffset);
+    } catch (_) {
+      return null;
+    }
   }
 
   Widget _buildMobileAccessoryBar(AppColorScheme scheme) {

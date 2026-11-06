@@ -451,5 +451,38 @@ void main() {
       expect(feedChunk('echo hello\r'), isFalse);
       expect(writtenBytes, isEmpty);
     });
+
+    group('expandFromScreenLine (history recall / paste fallback)', () {
+      bool fromScreen(String line, [int? cursor]) => engine.expandFromScreenLine(
+            lineText: line,
+            cursorOffset: cursor ?? line.length,
+            macros: macros,
+            writeRaw: (bytes) => writtenBytes.add(bytes),
+            onTriggerSecret: (m) => triggeredSecrets.add(m),
+          );
+
+      test('expands ??macro shown after the prompt', () {
+        final line = 'user@host:~\$ ??send ITS*';
+        expect(fromScreen(line), isTrue);
+        expect(writtenBytes[0], List.filled('??send ITS*'.length, 0x7F));
+        expect(utf8.decode(writtenBytes[1]), 'scp ITS* host:/tmp/');
+        expect(utf8.decode(writtenBytes[2]), '\r');
+        expect(triggeredSecrets.length, 1);
+      });
+
+      test('moves to end of line first when cursor is mid-line', () {
+        final line = 'user@host:~\$ ??send ITS*';
+        expect(fromScreen(line, line.length - 3), isTrue);
+        expect(writtenBytes[0], [0x05]);
+        expect(writtenBytes[1], List.filled('??send ITS*'.length, 0x7F));
+      });
+
+      test('ignores unknown triggers, mid-token ?? and plain lines', () {
+        expect(fromScreen('user@host:~\$ ??nope x'), isFalse);
+        expect(fromScreen('user@host:~\$ echo a??send'), isFalse);
+        expect(fromScreen('user@host:~\$ ls -la'), isFalse);
+        expect(writtenBytes, isEmpty);
+      });
+    });
   });
 }

@@ -160,6 +160,62 @@ class TerminalMacroEngine {
     return true;
   }
 
+  /// Fallback expansion for Enter, based on the text actually shown on the shell's
+  /// current (logical) line rather than tracked keystrokes.
+  ///
+  /// Keystroke tracking loses sync when the line is changed in ways we can't mirror:
+  /// history recall (Up/Down, Ctrl+R), bracketed paste, cursor movement, etc. In those
+  /// cases the user still sees `??trigger args` on screen, so read it from there.
+  ///
+  /// [lineText] is the full logical line (prompt included, wrapped rows joined) and
+  /// [cursorOffset] is the cursor's character offset within it.
+  /// Returns `true` if a macro was expanded and the Enter key should be consumed.
+  bool expandFromScreenLine({
+    required String lineText,
+    required int cursorOffset,
+    required List<TerminalMacroItem> macros,
+    required void Function(List<int> bytes) writeRaw,
+    required void Function(TerminalMacroItem macro) onTriggerSecret,
+  }) {
+    final textEnd = lineText.trimRight().length;
+    if (textEnd == 0 || macros.isEmpty) return false;
+    final visible = lineText.substring(0, textEnd);
+
+    // ?? must start the line or follow whitespace (same boundary rule as typed input).
+    final pattern = RegExp(r'(?<=^|\s)\?\?(\S+)');
+    for (final match in pattern.allMatches(visible)) {
+      final triggerWord = match.group(1)!.toLowerCase();
+      TerminalMacroItem? matchedMacro;
+      for (final m in macros) {
+        if (m.cleanTrigger.isNotEmpty && m.cleanTrigger.toLowerCase() == triggerWord) {
+          matchedMacro = m;
+          break;
+        }
+      }
+      if (matchedMacro == null) continue;
+
+      final rawArgs = visible.substring(match.end).trim();
+      final cursorAtEnd = cursorOffset >= textEnd;
+      // If the cursor sits mid-line, jump to end of line (readline Ctrl+E) first so
+      // the backspaces erase the whole ??macro invocation.
+      final eraseEnd = cursorAtEnd ? cursorOffset : textEnd;
+      if (!cursorAtEnd) writeRaw(const [0x05]);
+      writeRaw(List.filled(eraseEnd - match.start, 0x7F));
+      writeRaw(utf8.encode(matchedMacro.interpolate(rawArgs)));
+      if (matchedMacro.executeImmediately) {
+        writeRaw(utf8.encode('\r'));
+      }
+      if (matchedMacro.copySecretToClipboard &&
+          matchedMacro.secretValue != null &&
+          matchedMacro.secretValue!.isNotEmpty) {
+        onTriggerSecret(matchedMacro);
+      }
+      reset();
+      return true;
+    }
+    return false;
+  }
+
   bool _processChar({
     required String data,
     required List<TerminalMacroItem> macros,
