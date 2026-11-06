@@ -371,12 +371,23 @@ void main() {
 
     test('interpolates arguments on Enter with ??send', () {
       feedString('??send mydoc.pdf\r');
-      expect(writtenBytes.length, 2);
+      // executeImmediately defaults to true: erase, expanded command, carriage return
+      expect(writtenBytes.length, 3);
       // Erases '??send mydoc.pdf' (16 chars)
-      expect(writtenBytes[0].length, 16);
+      expect(writtenBytes[0], List.filled(16, 0x7F));
       expect(utf8.decode(writtenBytes[1]), 'scp mydoc.pdf host:/tmp/');
+      expect(utf8.decode(writtenBytes[2]), '\r');
       expect(triggeredSecrets.length, 1);
       expect(triggeredSecrets.first.name, 'Send file');
+    });
+
+    test('does not send carriage return on Enter when executeImmediately is false', () {
+      macros[1].executeImmediately = false;
+      feedString('??send mydoc.pdf\r');
+      expect(writtenBytes.length, 2);
+      expect(writtenBytes[0], List.filled(16, 0x7F));
+      expect(utf8.decode(writtenBytes[1]), 'scp mydoc.pdf host:/tmp/');
+      expect(triggeredSecrets.length, 1);
     });
 
     test('resets buffer on Ctrl+C', () {
