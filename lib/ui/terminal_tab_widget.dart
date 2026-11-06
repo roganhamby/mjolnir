@@ -2201,33 +2201,71 @@ Total Characters Logged: $_screenLogBytesWritten
     }
 
     final macros = _effectiveMacros;
+    final altBuffer = terminal.isUsingAltBuffer;
     if (_macroEngine.processInput(
       data: data,
       macros: macros,
-      isUsingAltBuffer: terminal.isUsingAltBuffer,
+      isUsingAltBuffer: altBuffer,
       writeRaw: writeRaw,
       onTriggerSecret: onTriggerSecret,
     )) {
       return true;
     }
 
-    // Keystroke tracking can't follow history recall, pastes or cursor edits. On a
-    // plain Enter, fall back to the ??macro text actually displayed on the line.
-    if (macros.isNotEmpty &&
-        !terminal.isUsingAltBuffer &&
-        (data == '\r' || data == '\n' || data == '\r\n')) {
-      final line = _readCursorLogicalLine();
-      if (line != null) {
-        return _macroEngine.expandFromScreenLine(
-          lineText: line.text,
-          cursorOffset: line.cursorOffset,
-          macros: macros,
-          writeRaw: writeRaw,
-          onTriggerSecret: onTriggerSecret,
-        );
+    final isPlainEnter = data == '\r' || data == '\n' || data == '\r\n';
+    final hasEnter = data.contains('\r') || data.contains('\n');
+    if (!hasEnter) return false;
+
+    // Keystroke tracking can't follow history recall, pastes or cursor edits, and is
+    // disabled on the alternate screen buffer (GNU screen / tmux always use it, so do
+    // full-screen apps). On a plain Enter, fall back to the ??macro text actually
+    // displayed on the cursor line. This only fires when a *known* trigger appears at
+    // a word boundary, so it is safe to also allow on the alt buffer.
+    final line = _readCursorLogicalLine();
+    if (isPlainEnter && macros.isNotEmpty && line != null) {
+      if (_macroEngine.expandFromScreenLine(
+        lineText: line.text,
+        cursorOffset: line.cursorOffset,
+        macros: macros,
+        writeRaw: writeRaw,
+        onTriggerSecret: onTriggerSecret,
+      )) {
+        return true;
       }
     }
+
+    // Diagnostics: Enter on a line that visibly contains ??word but nothing expanded.
+    final missLine = line?.text ?? '';
+    final miss = RegExp(r'(?<=^|\s)\?\?(\S+)').firstMatch(missLine.trimRight());
+    if (miss != null) {
+      _reportMacroMiss(
+        typed: miss.group(1)!,
+        data: data,
+        macros: macros,
+        altBuffer: altBuffer,
+        lineRead: line != null,
+      );
+    }
     return false;
+  }
+
+  /// Shows why a visible `??word` was not expanded so failures can be diagnosed
+  /// from the UI (macro count/triggers, alt-buffer state, raw Enter bytes).
+  void _reportMacroMiss({
+    required String typed,
+    required String data,
+    required List<TerminalMacroItem> macros,
+    required bool altBuffer,
+    required bool lineRead,
+  }) {
+    final triggers = macros.map((m) => '"${m.cleanTrigger}"').join(', ');
+    final enterBytes = data.codeUnits.map((c) => '0x${c.toRadixString(16)}').join(' ');
+    final msg = 'Macro "??$typed" not expanded. '
+        'Loaded macros: ${macros.length}${macros.isEmpty ? '' : ' [$triggers]'}; '
+        'altBuffer=$altBuffer; enter=[$enterBytes]; lineRead=$lineRead';
+    debugPrint('[macro] $msg');
+    if (!mounted) return;
+    AppNotification.show(context, message: msg, duration: const Duration(seconds: 10));
   }
 
   /// Returns the logical line under the cursor (wrapped rows joined) and the

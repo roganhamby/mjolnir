@@ -1,0 +1,11 @@
+eoli@kdh-palni:~/migration/oclc$ ??get ITS*
+-bash: ??get: command not found
+
+trigger pattern: get
+
+command:
+scp -oHostKeyAlgorithms=+ssh-rsa rhamby@nox.esilibrary.com:~/temp/{1} .
+
+Platform Windows 11
+
+I tried it in and out of a screen session and it behaved the same way, in order to see if the screen session was a variable.
