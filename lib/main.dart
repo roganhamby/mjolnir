@@ -11,6 +11,7 @@ import 'models/server_config.dart';
 import 'models/task_item.dart';
 import 'models/stored_string_item.dart';
 import 'models/special_character_item.dart';
+import 'models/note_item.dart';
 import 'services/local_shell_service.dart';
 import 'services/sftp_sync_service.dart';
 import 'services/sync_storage_provider.dart';
@@ -21,6 +22,7 @@ import 'ui/sftp_tab_widget.dart';
 import 'ui/task_manager_tab_widget.dart';
 import 'ui/stored_strings_tab_widget.dart';
 import 'ui/macros_tab_widget.dart';
+import 'ui/notes_tab_widget.dart';
 import 'ui/server_edit_dialog.dart';
 import 'ui/host_key_verify_dialog.dart';
 import 'ui/known_hosts_manager_dialog.dart';
@@ -93,6 +95,12 @@ class TabItem {
   int timerSeconds;
   bool isTimerRunning;
   Timer? _activeTimer;
+
+  /// ID of the note currently docked in a side panel next to this tab (SSH / SFTP only).
+  String? openNoteId;
+
+  /// Width of the docked note side panel.
+  double notePanelWidth = 380;
 
   TabItem({
     required this.id,
@@ -170,6 +178,12 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
   late final SshService _sshService;
   late final LocalShellService _localShellService;
   final GlobalKey _pasteboardButtonKey = GlobalKey();
+
+  /// Note selected in the Notes tab.
+  String? _selectedNoteId;
+
+  /// Notes deleted this session; guards against a closing editor re-saving them.
+  final Set<String> _deletedNoteIds = {};
 
   final List<TabItem> _openTabs = [];
   int _activeTabIndex = -1;
@@ -450,6 +464,128 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
       _activeTabIndex = _openTabs.length - 1;
       _collapseSidebarIfNarrowScreen();
     });
+  }
+
+  void _openNotesTab([String? noteId]) {
+    if (noteId != null) _selectedNoteId = noteId;
+    final existingIndex = _openTabs.indexWhere((t) => t.type == 'notes');
+    if (existingIndex >= 0) {
+      setState(() {});
+      _setActiveTabIndex(existingIndex);
+      _collapseSidebarIfNarrowScreen();
+      return;
+    }
+
+    _stopActiveTabTimer();
+    setState(() {
+      _openTabs.add(
+        TabItem(
+          id: 'notes-${DateTime.now().millisecondsSinceEpoch}',
+          title: 'Notes',
+          icon: Icons.sticky_note_2_outlined,
+          color: Colors.lightBlueAccent,
+          type: 'notes',
+        ),
+      );
+      _activeTabIndex = _openTabs.length - 1;
+      _collapseSidebarIfNarrowScreen();
+    });
+  }
+
+  static bool _isSessionTab(TabItem t) =>
+      t.type == 'ssh' || t.type == 'sftp' || t.type == 'local';
+
+  TabItem? get _activeSessionTab {
+    if (_activeTabIndex < 0 || _activeTabIndex >= _openTabs.length) return null;
+    final tab = _openTabs[_activeTabIndex];
+    return _isSessionTab(tab) ? tab : null;
+  }
+
+  NoteItem? _findNote(String id) {
+    for (final n in _vaultManager.notes) {
+      if (n.id == id) return n;
+    }
+    return null;
+  }
+
+  List<NoteItem> _notesForTab(TabItem tab) {
+    return _vaultManager.notes.where((n) => n.matchesTabTitle(tab.title)).toList()
+      ..sort((a, b) => a.displayTitle.toLowerCase().compareTo(b.displayTitle.toLowerCase()));
+  }
+
+  List<String> get _sessionTabTitles =>
+      _openTabs.where(_isSessionTab).map((t) => t.title).toList();
+
+  Future<void> _saveNote(NoteItem note) async {
+    if (!_vaultManager.isUnlocked || _deletedNoteIds.contains(note.id)) return;
+    try {
+      await _vaultManager.saveNote(note);
+    } catch (e) {
+      if (mounted) AppNotification.error(context, 'Failed to save note: $e');
+    }
+    if (mounted) setState(() {});
+  }
+
+  Future<void> _deleteNote(String id) async {
+    _deletedNoteIds.add(id);
+    await _vaultManager.deleteNote(id);
+    if (!mounted) return;
+    setState(() {
+      if (_selectedNoteId == id) _selectedNoteId = null;
+      for (final t in _openTabs) {
+        if (t.openNoteId == id) t.openNoteId = null;
+      }
+    });
+  }
+
+  void _openNoteInTabPanel(TabItem tab, String noteId) {
+    setState(() => tab.openNoteId = noteId);
+  }
+
+  Future<void> _createNoteLinkedToTab(TabItem tab) async {
+    final note = NotesTabWidget.createNote(linkTitle: tab.title);
+    await _saveNote(note);
+    if (mounted) _openNoteInTabPanel(tab, note.id);
+  }
+
+  Future<void> _linkExistingNoteToTab(TabItem tab) async {
+    final candidates = _vaultManager.notes.where((n) => !n.matchesTabTitle(tab.title)).toList()
+      ..sort((a, b) => b.updatedAt.compareTo(a.updatedAt));
+    if (candidates.isEmpty) {
+      AppNotification.show(context, message: 'All notes are already linked to this tab.');
+      return;
+    }
+    final linkTitle = NoteItem.linkTitleForTab(tab.title);
+    final picked = await showDialog<NoteItem>(
+      context: context,
+      builder: (ctx) => SimpleDialog(
+        title: Text('Link a note to "$linkTitle"'),
+        children: [
+          SizedBox(
+            width: 380,
+            height: (candidates.length * 52.0).clamp(52.0, 360.0),
+            child: ListView(
+              children: candidates
+                  .map((n) => ListTile(
+                        dense: true,
+                        leading: const Icon(Icons.sticky_note_2_outlined, size: 18),
+                        title: Text(n.displayTitle, overflow: TextOverflow.ellipsis),
+                        subtitle: n.linkedTitles.isEmpty
+                            ? null
+                            : Text('Linked: ${n.linkedTitles.join(', ')}',
+                                overflow: TextOverflow.ellipsis),
+                        onTap: () => Navigator.of(ctx).pop(n),
+                      ))
+                  .toList(),
+            ),
+          ),
+        ],
+      ),
+    );
+    if (picked == null || !mounted) return;
+    picked.linkToTabTitle(tab.title);
+    await _saveNote(picked);
+    if (mounted) _openNoteInTabPanel(tab, picked.id);
   }
 
   TaskItem? _getAssignedTaskForTab(String tabId) {
@@ -1717,6 +1853,290 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
     );
   }
 
+  /// App-bar "Notes" menu (to the right of Pasteboard): lists all notes plus
+  /// New Note / Open Notes Tab.
+  Widget _buildNotesMenuButton(AppColorScheme scheme) {
+    final notes = [..._vaultManager.notes]..sort((a, b) => b.updatedAt.compareTo(a.updatedAt));
+    return PopupMenuButton<String>(
+      tooltip: 'Notes',
+      onSelected: (val) async {
+        if (val == '__new_note__') {
+          final note = NotesTabWidget.createNote();
+          await _saveNote(note);
+          if (mounted) _openNotesTab(note.id);
+        } else if (val == '__open_notes_tab__') {
+          _openNotesTab();
+        } else {
+          _openNotesTab(val);
+        }
+      },
+      constraints: const BoxConstraints(minWidth: 220, maxWidth: 360, maxHeight: 460),
+      itemBuilder: (ctx) => [
+        PopupMenuItem<String>(
+          value: '__new_note__',
+          height: 36,
+          child: Row(
+            children: [
+              Icon(Icons.note_add_outlined, size: 16, color: scheme.accentColor),
+              const SizedBox(width: 10),
+              const Text('New Note', style: TextStyle(fontSize: 12)),
+            ],
+          ),
+        ),
+        PopupMenuItem<String>(
+          value: '__open_notes_tab__',
+          height: 36,
+          child: Row(
+            children: [
+              Icon(Icons.tab, size: 16, color: scheme.accentColor),
+              const SizedBox(width: 10),
+              const Text('Open Notes Tab', style: TextStyle(fontSize: 12)),
+            ],
+          ),
+        ),
+        if (notes.isNotEmpty) const PopupMenuDivider(),
+        ...notes.map(
+          (n) => PopupMenuItem<String>(
+            value: n.id,
+            height: 40,
+            child: Row(
+              children: [
+                Icon(Icons.sticky_note_2_outlined, size: 16, color: scheme.mutedText),
+                const SizedBox(width: 10),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Text(
+                        n.displayTitle,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: TextStyle(fontSize: 12, fontWeight: FontWeight.bold, color: scheme.primaryText),
+                      ),
+                      if (n.linkedTitles.isNotEmpty)
+                        Text(
+                          n.linkedTitles.join(', '),
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: TextStyle(fontSize: 10, color: scheme.accentColor),
+                        ),
+                    ],
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ],
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(Icons.sticky_note_2_outlined, size: 18, color: scheme.accentColor),
+            const SizedBox(width: 8),
+            Text(
+              notes.isEmpty ? 'Notes' : 'Notes (${notes.length})',
+              style: TextStyle(fontSize: 12, color: scheme.primaryText),
+            ),
+            Icon(Icons.arrow_drop_down, size: 16, color: scheme.mutedText),
+          ],
+        ),
+      ),
+    );
+  }
+
+  /// App-bar "Related Notes" dropdown (to the right of the color scheme picker).
+  /// Only shown while an SSH / SFTP / local shell tab is active; lists notes
+  /// linked to that tab's title and opens them in a docked side panel.
+  Widget _buildRelatedNotesButton(AppColorScheme scheme) {
+    final tab = _activeSessionTab;
+    if (tab == null) return const SizedBox.shrink();
+    final related = _notesForTab(tab);
+    final linkTitle = NoteItem.linkTitleForTab(tab.title);
+
+    return PopupMenuButton<String>(
+      tooltip: related.isEmpty
+          ? 'No notes linked to "$linkTitle"'
+          : '${related.length} note(s) linked to "$linkTitle"',
+      onSelected: (val) {
+        if (val == '__new_linked__') {
+          _createNoteLinkedToTab(tab);
+        } else if (val == '__link_existing__') {
+          _linkExistingNoteToTab(tab);
+        } else if (val == '__close_panel__') {
+          setState(() => tab.openNoteId = null);
+        } else {
+          _openNoteInTabPanel(tab, val);
+        }
+      },
+      constraints: const BoxConstraints(minWidth: 240, maxWidth: 360, maxHeight: 460),
+      itemBuilder: (ctx) => [
+        PopupMenuItem<String>(
+          enabled: false,
+          height: 28,
+          child: Text(
+            'NOTES FOR "${linkTitle.toUpperCase()}"',
+            style: TextStyle(fontSize: 10, fontWeight: FontWeight.bold, color: scheme.mutedText),
+            overflow: TextOverflow.ellipsis,
+          ),
+        ),
+        if (related.isEmpty)
+          const PopupMenuItem<String>(
+            enabled: false,
+            height: 32,
+            child: Text('No linked notes yet', style: TextStyle(fontSize: 12)),
+          ),
+        ...related.map(
+          (n) => PopupMenuItem<String>(
+            value: n.id,
+            height: 36,
+            child: Row(
+              children: [
+                if (tab.openNoteId == n.id)
+                  Icon(Icons.check, size: 15, color: scheme.accentColor)
+                else
+                  Icon(Icons.sticky_note_2_outlined, size: 15, color: scheme.mutedText),
+                const SizedBox(width: 10),
+                Expanded(
+                  child: Text(
+                    n.displayTitle,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: TextStyle(
+                      fontSize: 12,
+                      fontWeight: tab.openNoteId == n.id ? FontWeight.bold : FontWeight.normal,
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+        const PopupMenuDivider(),
+        PopupMenuItem<String>(
+          value: '__new_linked__',
+          height: 36,
+          child: Row(
+            children: [
+              Icon(Icons.note_add_outlined, size: 15, color: scheme.accentColor),
+              const SizedBox(width: 10),
+              Flexible(
+                child: Text('New note linked to "$linkTitle"',
+                    style: const TextStyle(fontSize: 12), overflow: TextOverflow.ellipsis),
+              ),
+            ],
+          ),
+        ),
+        if (_vaultManager.notes.length > related.length)
+          PopupMenuItem<String>(
+            value: '__link_existing__',
+            height: 36,
+            child: Row(
+              children: [
+                Icon(Icons.add_link, size: 15, color: scheme.accentColor),
+                const SizedBox(width: 10),
+                const Text('Link existing note...', style: TextStyle(fontSize: 12)),
+              ],
+            ),
+          ),
+        if (tab.openNoteId != null)
+          PopupMenuItem<String>(
+            value: '__close_panel__',
+            height: 36,
+            child: Row(
+              children: [
+                Icon(Icons.close, size: 15, color: scheme.mutedText),
+                const SizedBox(width: 10),
+                const Text('Close note panel', style: TextStyle(fontSize: 12)),
+              ],
+            ),
+          ),
+      ],
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 6),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Badge(
+              isLabelVisible: related.isNotEmpty,
+              label: Text('${related.length}', style: const TextStyle(fontSize: 9)),
+              backgroundColor: scheme.accentColor,
+              textColor: scheme.scaffoldBackground,
+              child: Icon(
+                Icons.speaker_notes_outlined,
+                size: 20,
+                color: related.isNotEmpty ? scheme.accentColor : scheme.mutedText,
+              ),
+            ),
+            Icon(Icons.arrow_drop_down, size: 16, color: scheme.mutedText),
+          ],
+        ),
+      ),
+    );
+  }
+
+  /// Wraps an SSH / SFTP tab body with an optional, resizable docked note panel.
+  /// The tree shape (Row -> Expanded -> child) never changes, so opening or
+  /// closing the panel does not recreate the terminal / SFTP session state.
+  Widget _wrapWithNotePanel(TabItem t, Widget child, AppColorScheme scheme) {
+    final note = t.openNoteId == null ? null : _findNote(t.openNoteId!);
+    return LayoutBuilder(
+      key: ValueKey('notewrap-${t.id}'),
+      builder: (context, constraints) {
+        const dividerWidth = 6.0;
+        final maxPanel = (constraints.maxWidth * 0.75).clamp(0.0, double.infinity);
+        final minPanel = maxPanel < 220.0 ? maxPanel : 220.0;
+        final panelWidth = t.notePanelWidth.clamp(minPanel, maxPanel);
+        return Row(
+          children: [
+            Expanded(child: child),
+            if (note != null) ...[
+              MouseRegion(
+                cursor: SystemMouseCursors.resizeColumn,
+                child: GestureDetector(
+                  behavior: HitTestBehavior.opaque,
+                  onHorizontalDragUpdate: (details) {
+                    setState(() {
+                      t.notePanelWidth = (panelWidth - details.delta.dx).clamp(minPanel, maxPanel);
+                    });
+                  },
+                  child: Container(
+                    width: dividerWidth,
+                    color: scheme.borderColor,
+                    child: Center(
+                      child: Container(
+                        width: 2,
+                        height: 36,
+                        decoration: BoxDecoration(
+                          color: scheme.mutedText.withAlpha(120),
+                          borderRadius: BorderRadius.circular(1),
+                        ),
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+              SizedBox(
+                width: panelWidth,
+                child: NoteEditorPanel(
+                  key: ValueKey('notepanel-${t.id}'),
+                  note: note,
+                  compact: true,
+                  onSave: _saveNote,
+                  suggestedLinkTitles: _sessionTabTitles,
+                  onClose: () => setState(() => t.openNoteId = null),
+                  onOpenInNotesTab: () => _openNotesTab(note.id),
+                ),
+              ),
+            ],
+          ],
+        );
+      },
+    );
+  }
+
   Widget _buildColorSchemeMenuButton(AppColorScheme activeScheme) {
     return PopupMenuButton<String>(
       tooltip: 'App Color Scheme: ${activeScheme.name}',
@@ -1814,9 +2234,23 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
                 errorBuilder: (context, error, stackTrace) => Icon(Icons.bolt, color: scheme.accentColor, size: 22),
               ),
               const SizedBox(width: 8),
-              Text('Mjölnir', style: TextStyle(fontSize: 17, fontWeight: FontWeight.bold, color: scheme.primaryText)),
+              Flexible(
+                child: Text(
+                  'Mjölnir',
+                  style: TextStyle(fontSize: 17, fontWeight: FontWeight.bold, color: scheme.primaryText),
+                  overflow: TextOverflow.ellipsis,
+                  softWrap: false,
+                ),
+              ),
               const SizedBox(width: 8),
-              Text('• SSH & SFTP', style: TextStyle(fontSize: 12, color: scheme.mutedText)),
+              Flexible(
+                child: Text(
+                  '• SSH & SFTP',
+                  style: TextStyle(fontSize: 12, color: scheme.mutedText),
+                  overflow: TextOverflow.ellipsis,
+                  softWrap: false,
+                ),
+              ),
             ],
           ),
           actions: [
@@ -1886,7 +2320,9 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
                 onPressed: _openStoredStringsTab,
               ),
             ),
+            _buildNotesMenuButton(scheme),
             _buildColorSchemeMenuButton(scheme),
+            _buildRelatedNotesButton(scheme),
             PopupMenuButton<String>(
               icon: const Icon(Icons.file_upload_outlined, size: 20),
               tooltip: 'Import JSON Connections',
@@ -1977,7 +2413,10 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
             IconButton(
               icon: const Icon(Icons.lock_outline, size: 20),
               tooltip: 'Lock Vault',
-              onPressed: () {
+              onPressed: () async {
+                // Persist any in-flight note edits before the vault key is cleared.
+                await NoteEditorPanel.flushAll();
+                if (!mounted) return;
                 _stopAllTabTimers();
                 setState(() {
                   _openTabs.clear();
@@ -2379,6 +2818,11 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
                   label: const Text('Open Pasteboard'),
                   onPressed: _openStoredStringsTab,
                 ),
+                OutlinedButton.icon(
+                  icon: Icon(Icons.sticky_note_2_outlined, size: 16, color: scheme.accentColor),
+                  label: const Text('Open Notes'),
+                  onPressed: () => _openNotesTab(),
+                ),
               ],
             ),
           ],
@@ -2672,10 +3116,20 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
                     if (mounted) setState(() {});
                   },
                 );
+              } else if (t.type == 'notes') {
+                return NotesTabWidget(
+                  key: ValueKey(t.id),
+                  notes: _vaultManager.notes,
+                  selectedNoteId: _selectedNoteId,
+                  onSelectNote: (id) => setState(() => _selectedNoteId = id),
+                  onSaveNote: _saveNote,
+                  onDeleteNote: _deleteNote,
+                  suggestedLinkTitles: _sessionTabTitles,
+                );
               } else if (t.type == 'ssh' || t.type == 'local') {
                 final server = t.server!;
                 final isLocal = t.type == 'local';
-                return TerminalTabWidget(
+                return _wrapWithNotePanel(t, TerminalTabWidget(
                   key: ValueKey(t.id),
                   server: server,
                   sshService: _sshService,
@@ -2713,10 +3167,10 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
                   },
                   onClose: () => _closeTab(t.id),
                   timerWidget: _buildTabTimerWidget(t, tabIndex, tabIndex == _activeTabIndex, scheme),
-                );
+                ), scheme);
               } else {
                 final server = t.server!;
-                return SftpTabWidget(
+                return _wrapWithNotePanel(t, SftpTabWidget(
                   key: ValueKey(t.id),
                   server: server,
                   sshService: _sshService,
@@ -2738,7 +3192,7 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
                     await _vaultManager.saveServer(server);
                     if (mounted) setState(() {});
                   },
-                );
+                ), scheme);
               }
             }).toList(),
           ),

@@ -404,5 +404,52 @@ void main() {
       feedString('?gs '); // Only one '?' followed by 'gs '
       expect(writtenBytes, isEmpty);
     });
+
+    bool feedChunk(String chunk) => engine.processInput(
+          data: chunk,
+          macros: macros,
+          isUsingAltBuffer: false,
+          writeRaw: (bytes) => writtenBytes.add(bytes),
+          onTriggerSecret: (m) => triggeredSecrets.add(m),
+        );
+
+    for (final ctrl in {'Ctrl+L': '\x0c', 'Ctrl+W': '\x17', 'Ctrl+A': '\x01', 'Ctrl+K': '\x0b'}.entries) {
+      test('still expands at line start after ${ctrl.key}', () {
+        feedString(ctrl.value);
+        feedString('??send mydoc.pdf\r');
+        expect(writtenBytes.length, 3);
+        expect(utf8.decode(writtenBytes[1]), 'scp mydoc.pdf host:/tmp/');
+      });
+    }
+
+    test('still expands after Ctrl+W erases a typed word', () {
+      feedString('lsfoo');
+      feedString('\x17');
+      feedString('??send mydoc.pdf\r');
+      expect(utf8.decode(writtenBytes[1]), 'scp mydoc.pdf host:/tmp/');
+    });
+
+    test('expands when text and Enter arrive in one chunk', () {
+      feedString('??send ');
+      expect(feedChunk('mydoc.pdf\r'), isTrue);
+      // passthrough "mydoc.pdf" is written first, then erased with the rest of the line
+      expect(utf8.decode(writtenBytes[0]), 'mydoc.pdf');
+      expect(writtenBytes[1], List.filled(16, 0x7F));
+      expect(utf8.decode(writtenBytes[2]), 'scp mydoc.pdf host:/tmp/');
+      expect(utf8.decode(writtenBytes[3]), '\r');
+    });
+
+    test('expands when a whole line arrives in one chunk (CRLF counted once)', () {
+      expect(feedChunk('??send mydoc.pdf\r\n'), isTrue);
+      final all = writtenBytes.expand((b) => b).toList();
+      final text = utf8.decode(all.where((b) => b != 0x7F).toList());
+      expect(text, '??send mydoc.pdfscp mydoc.pdf host:/tmp/\r');
+      expect(all.where((b) => b == 0x7F).length, 16);
+    });
+
+    test('multi-char chunk without macros is passed through untouched', () {
+      expect(feedChunk('echo hello\r'), isFalse);
+      expect(writtenBytes, isEmpty);
+    });
   });
 }

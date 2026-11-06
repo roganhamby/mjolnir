@@ -2,6 +2,7 @@ import 'dart:convert';
 import 'package:cryptography/cryptography.dart';
 import 'server_config.dart';
 import 'stored_string_item.dart';
+import 'note_item.dart';
 import 'task_item.dart';
 import 'terminal_macro_item.dart';
 import '../services/crypto_vault_service.dart';
@@ -17,6 +18,7 @@ class SyncVaultFile {
   List<TaskItem> tasks;
   List<StoredStringItem> storedStrings;
   List<TerminalMacroItem> macros;
+  List<NoteItem> notes;
 
   SyncVaultFile({
     this.version = 1,
@@ -29,11 +31,13 @@ class SyncVaultFile {
     List<TaskItem>? tasks,
     List<StoredStringItem>? storedStrings,
     List<TerminalMacroItem>? macros,
+    List<NoteItem>? notes,
   })  : updatedAt = updatedAt ?? DateTime.now().toUtc(),
         servers = servers ?? [],
         tasks = tasks ?? [],
         storedStrings = storedStrings ?? [],
-        macros = macros ?? [];
+        macros = macros ?? [],
+        notes = notes ?? [];
 
   bool get isEncryptedEnvelope => vaultPayload != null;
 
@@ -46,6 +50,7 @@ class SyncVaultFile {
       tasks: [],
       storedStrings: [],
       macros: [],
+      notes: [],
     );
   }
 
@@ -68,6 +73,7 @@ class SyncVaultFile {
           'tasks': tasks.map((t) => t.toJson()).toList(),
           'stored_strings': storedStrings.map((s) => s.toJson()).toList(),
           'macros': macros.map((m) => m.toJson()).toList(),
+          'notes': notes.map((n) => n.toJson()).toList(),
         },
       };
 
@@ -87,6 +93,9 @@ class SyncVaultFile {
     final macroList = (json['macros'] as List<dynamic>? ?? [])
         .map((e) => TerminalMacroItem.fromJson(e as Map<String, dynamic>))
         .toList();
+    final noteList = (json['notes'] as List<dynamic>? ?? [])
+        .map((e) => NoteItem.fromJson(e as Map<String, dynamic>))
+        .toList();
 
     return SyncVaultFile(
       version: json['version'] as int? ?? (vPayload != null ? 2 : 1),
@@ -102,6 +111,7 @@ class SyncVaultFile {
       tasks: taskList,
       storedStrings: stringList,
       macros: macroList,
+      notes: noteList,
     );
   }
 
@@ -133,15 +143,21 @@ class SyncVaultFile {
           .map((e) => TerminalMacroItem.fromJson(e as Map<String, dynamic>))
           .toList();
     }
+    if (decryptedMap['notes'] is List) {
+      notes = (decryptedMap['notes'] as List)
+          .map((e) => NoteItem.fromJson(e as Map<String, dynamic>))
+          .toList();
+    }
   }
 
-  /// Encrypts in-memory servers, tasks, stored_strings, and macros into [vaultPayload].
+  /// Encrypts in-memory servers, tasks, stored_strings, macros, and notes into [vaultPayload].
   Future<void> encryptPayload(CryptoVaultService cryptoService, SecretKey masterKey) async {
     final innerData = {
       'servers': servers.map((s) => s.toJson()).toList(),
       'tasks': tasks.map((t) => t.toJson()).toList(),
       'stored_strings': storedStrings.map((s) => s.toJson()).toList(),
       'macros': macros.map((m) => m.toJson()).toList(),
+      'notes': notes.map((n) => n.toJson()).toList(),
     };
     vaultPayload = await cryptoService.encryptPayload(
       payload: innerData,
@@ -223,6 +239,22 @@ class SyncVaultFile {
       }
     }
 
+    final Map<String, NoteItem> currentNoteMap = {
+      for (var n in notes) n.id: n,
+    };
+
+    for (final remoteNote in remoteVault.notes) {
+      if (!currentNoteMap.containsKey(remoteNote.id)) {
+        notes.add(remoteNote);
+      } else {
+        final localNote = currentNoteMap[remoteNote.id]!;
+        if (remoteNote.updatedAt.isAfter(localNote.updatedAt)) {
+          final index = notes.indexOf(localNote);
+          notes[index] = remoteNote;
+        }
+      }
+    }
+
     if (remoteVault.encryptedSftpSyncConfig != null &&
         (encryptedSftpSyncConfig == null ||
             remoteVault.updatedAt.isAfter(updatedAt))) {
@@ -244,6 +276,7 @@ class SyncVaultFile {
             candidate.tasks.isNotEmpty ||
             candidate.storedStrings.isNotEmpty ||
             candidate.macros.isNotEmpty ||
+            candidate.notes.isNotEmpty ||
             candidate.encryptedSftpSyncConfig != null ||
             candidate.vaultPayload != null)) {
       return true;

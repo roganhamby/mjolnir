@@ -3,6 +3,7 @@ import 'package:flutter/foundation.dart';
 import 'package:cryptography/cryptography.dart';
 import '../models/server_config.dart';
 import '../models/stored_string_item.dart';
+import '../models/note_item.dart';
 import '../models/task_item.dart';
 import '../models/terminal_macro_item.dart';
 import '../models/sync_vault_file.dart';
@@ -32,6 +33,7 @@ class VaultManager with ChangeNotifier {
   List<TaskItem> get tasks => _vault?.tasks ?? [];
   List<StoredStringItem> get storedStrings => _vault?.storedStrings ?? [];
   List<TerminalMacroItem> get macros => _vault?.macros ?? [];
+  List<NoteItem> get notes => _vault?.notes ?? [];
   String? get errorMessage => _errorMessage;
   String get loadedSource => _loadedSource;
 
@@ -54,6 +56,7 @@ class VaultManager with ChangeNotifier {
                     activeVault.tasks.isNotEmpty ||
                     activeVault.storedStrings.isNotEmpty ||
                     activeVault.macros.isNotEmpty ||
+                    activeVault.notes.isNotEmpty ||
                     activeVault.encryptedSftpSyncConfig != null ||
                     activeVault.vaultPayload != null);
             if (SyncVaultFile.isNewerVault(
@@ -238,6 +241,7 @@ class VaultManager with ChangeNotifier {
       _vault!.tasks = [];
       _vault!.storedStrings = [];
       _vault!.macros = [];
+      _vault!.notes = [];
     }
     notifyListeners();
   }
@@ -332,6 +336,17 @@ class VaultManager with ChangeNotifier {
         }
       } else {
         _vault!.macros.add(item);
+      }
+    }
+
+    for (final item in importedVault.notes) {
+      final existingIndex = _vault!.notes.indexWhere((n) => n.id == item.id);
+      if (existingIndex >= 0) {
+        if (item.updatedAt.isAfter(_vault!.notes[existingIndex].updatedAt)) {
+          _vault!.notes[existingIndex] = item;
+        }
+      } else {
+        _vault!.notes.add(item);
       }
     }
 
@@ -507,6 +522,37 @@ class VaultManager with ChangeNotifier {
     notifyListeners();
   }
 
+  /// Adds or updates a note and persists the vault.
+  Future<void> saveNote(NoteItem item) async {
+    if (!_isUnlocked || _vault == null) {
+      throw StateError('Cannot modify notes while vault is locked.');
+    }
+
+    item.updatedAt = DateTime.now().toUtc();
+    final existingIndex = _vault!.notes.indexWhere((n) => n.id == item.id);
+    if (existingIndex >= 0) {
+      _vault!.notes[existingIndex] = item;
+    } else {
+      _vault!.notes.add(item);
+    }
+
+    _vault!.updatedAt = DateTime.now().toUtc();
+    await _persistVault();
+    notifyListeners();
+  }
+
+  /// Deletes a note by ID and persists the vault.
+  Future<void> deleteNote(String id) async {
+    if (!_isUnlocked || _vault == null) {
+      throw StateError('Cannot modify notes while vault is locked.');
+    }
+
+    _vault!.notes.removeWhere((n) => n.id == id);
+    _vault!.updatedAt = DateTime.now().toUtc();
+    await _persistVault();
+    notifyListeners();
+  }
+
   /// Exports the current vault as an encrypted JSON string
   String exportVaultJson() {
     if (_vault == null) {
@@ -585,6 +631,7 @@ class VaultManager with ChangeNotifier {
             _vault!.tasks.isNotEmpty ||
             _vault!.storedStrings.isNotEmpty ||
             _vault!.macros.isNotEmpty ||
+            _vault!.notes.isNotEmpty ||
             _vault!.encryptedSftpSyncConfig != null ||
             _vault!.vaultPayload != null);
     if (_vault == null ||

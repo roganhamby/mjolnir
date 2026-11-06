@@ -80,6 +80,11 @@ class TerminalMacroEngine {
 
   /// Processes raw terminal input [data].
   /// Returns `true` if a macro expansion was handled and the raw input should be consumed.
+  ///
+  /// [data] may contain several characters at once (IME/soft keyboards, fast typing,
+  /// or "text + Enter" delivered in one event). Multi-character input is processed one
+  /// character at a time. If an expansion happens, the engine writes the whole chunk
+  /// (passthrough characters included) through [writeRaw] and returns `true`.
   bool processInput({
     required String data,
     required List<TerminalMacroItem> macros,
@@ -93,9 +98,76 @@ class TerminalMacroEngine {
       return false;
     }
 
-    // Line resets or interrupts (Ctrl+C, Ctrl+U, Escape)
-    if (data.contains('\x03') || data.contains('\x15') || data.contains('\x1b')) {
+    // Escape sequences (arrow keys, history navigation, bracketed paste, focus events)
+    // move the cursor or change the line in ways we can't track.
+    if (data.contains('\x1b')) {
       reset();
+      return false;
+    }
+
+    final chars = data.runes.map(String.fromCharCode).toList();
+    if (chars.isEmpty) return false;
+    if (chars.length == 1) {
+      return _processChar(
+        data: data,
+        macros: macros,
+        writeRaw: writeRaw,
+        onTriggerSecret: onTriggerSecret,
+      );
+    }
+
+    // Multi-character chunk: feed characters one at a time, buffering passthrough
+    // characters so they reach the shell before any expansion backspaces.
+    final pending = StringBuffer();
+    var expanded = false;
+    void flushPending() {
+      if (pending.isNotEmpty) {
+        writeRaw(utf8.encode(pending.toString()));
+        pending.clear();
+      }
+    }
+
+    var lastHandled = false;
+    for (var i = 0; i < chars.length; i++) {
+      final c = chars[i];
+      // Treat CRLF as a single Enter: if the '\r' triggered an expansion, drop the '\n'.
+      if (c == '\n' && i > 0 && chars[i - 1] == '\r') {
+        if (!lastHandled) pending.write(c);
+        continue;
+      }
+      final handled = _processChar(
+        data: c,
+        macros: macros,
+        writeRaw: (bytes) {
+          flushPending();
+          writeRaw(bytes);
+        },
+        onTriggerSecret: onTriggerSecret,
+      );
+      lastHandled = handled;
+      if (handled) {
+        expanded = true;
+      } else {
+        pending.write(c);
+      }
+    }
+
+    if (!expanded) {
+      // Nothing expanded: let the caller forward the original chunk unchanged.
+      return false;
+    }
+    flushPending();
+    return true;
+  }
+
+  bool _processChar({
+    required String data,
+    required List<TerminalMacroItem> macros,
+    required void Function(List<int> bytes) writeRaw,
+    required void Function(TerminalMacroItem macro) onTriggerSecret,
+  }) {
+    // Ctrl+L (clear screen) redraws the prompt but keeps the current line intact.
+    if (data == '\x0c') {
       return false;
     }
 
@@ -107,6 +179,16 @@ class TerminalMacroEngine {
       if (_inputLineTracker.isNotEmpty) {
         _inputLineTracker = _inputLineTracker.substring(0, _inputLineTracker.length - 1);
       }
+      return false;
+    }
+
+    // Any other control character (Ctrl+C, Ctrl+U, Ctrl+W, Ctrl+A, Ctrl+K, ...) either
+    // discards the line or edits/moves within it in ways we can't mirror. Reset tracking
+    // rather than recording the control byte as line text, which would otherwise block
+    // the start-of-word boundary check for the next ??macro on this line.
+    final code = data.codeUnitAt(0);
+    if (code < 0x20 && data != '\t' && data != '\r' && data != '\n') {
+      reset();
       return false;
     }
 

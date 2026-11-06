@@ -1832,6 +1832,8 @@ Total Characters Logged: $_screenLogBytesWritten
           final code = data.toLowerCase().codeUnitAt(0);
           setState(() => _ctrlModifierActive = false);
           if (code >= 97 && code <= 122) {
+            // Ctrl+<key> edits/discards the shell line; keep macro tracking in sync.
+            _macroEngine.reset();
             session.write(Uint8List.fromList([code - 96]));
             if (data.length > 1) {
               session.write(
@@ -1995,6 +1997,8 @@ Total Characters Logged: $_screenLogBytesWritten
           final code = data.toLowerCase().codeUnitAt(0);
           setState(() => _ctrlModifierActive = false);
           if (code >= 97 && code <= 122) {
+            // Ctrl+<key> edits/discards the shell line; keep macro tracking in sync.
+            _macroEngine.reset();
             // Convert 'a'..'z' to Ctrl+A..Ctrl+Z (1..26)
             session.session.stdin.add(Uint8List.fromList([code - 96]));
             if (data.length > 1) {
