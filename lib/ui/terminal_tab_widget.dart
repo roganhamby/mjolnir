@@ -164,6 +164,10 @@ class _TerminalTabWidgetState extends State<TerminalTabWidget>
   late TerminalTheme _currentTheme;
   int _lastCellWidth = 0;
   int _lastCellHeight = 0;
+  int _lastSyncedWidth = 0;
+  int _lastSyncedHeight = 0;
+  int _lastSyncedPixelWidth = 0;
+  int _lastSyncedPixelHeight = 0;
   bool _consumedCopyOnCtrlCDown = false;
   bool _isPrimaryPointerDown = false;
   Offset? _selectionDragOriginGlobal;
@@ -212,16 +216,24 @@ class _TerminalTabWidgetState extends State<TerminalTabWidget>
     if (w <= 0 || h <= 0) return;
     final cw = cellWidth ?? _lastCellWidth;
     final ch = cellHeight ?? _lastCellHeight;
+    final pw = cw > 0 ? w * cw : 0;
+    final ph = ch > 0 ? h * ch : 0;
+
+    if (w == _lastSyncedWidth &&
+        h == _lastSyncedHeight &&
+        pw == _lastSyncedPixelWidth &&
+        ph == _lastSyncedPixelHeight) {
+      return;
+    }
 
     final localSession = _localSession;
     if (localSession != null) {
       try {
-        localSession.resizeTerminal(
-          w,
-          h,
-          cw > 0 ? w * cw : 0,
-          ch > 0 ? h * ch : 0,
-        );
+        localSession.resizeTerminal(w, h, pw, ph);
+        _lastSyncedWidth = w;
+        _lastSyncedHeight = h;
+        _lastSyncedPixelWidth = pw;
+        _lastSyncedPixelHeight = ph;
       } catch (_) {}
       return;
     }
@@ -229,12 +241,11 @@ class _TerminalTabWidgetState extends State<TerminalTabWidget>
     final session = _sshSession?.session;
     if (session == null) return;
     try {
-      session.resizeTerminal(
-        w,
-        h,
-        cw > 0 ? w * cw : 0,
-        ch > 0 ? h * ch : 0,
-      );
+      session.resizeTerminal(w, h, pw, ph);
+      _lastSyncedWidth = w;
+      _lastSyncedHeight = h;
+      _lastSyncedPixelWidth = pw;
+      _lastSyncedPixelHeight = ph;
     } catch (_) {}
   }
 
@@ -1881,6 +1892,10 @@ Total Characters Logged: $_screenLogBytesWritten
   Future<void> _connect() async {
     _reconnectTimer?.cancel();
     _reconnectTimer = null;
+    _lastSyncedWidth = 0;
+    _lastSyncedHeight = 0;
+    _lastSyncedPixelWidth = 0;
+    _lastSyncedPixelHeight = 0;
 
     setState(() {
       _isLoading = true;

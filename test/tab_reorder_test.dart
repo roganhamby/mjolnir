@@ -86,7 +86,11 @@ void main() {
                             onPressed: () {
                               setState(() {
                                 tabs.removeAt(index);
-                                if (activeTabIndex >= tabs.length) {
+                                if (tabs.isEmpty) {
+                                  activeTabIndex = -1;
+                                } else if (index < activeTabIndex) {
+                                  activeTabIndex -= 1;
+                                } else if (activeTabIndex >= tabs.length) {
                                   activeTabIndex = tabs.length - 1;
                                 }
                               });
@@ -140,5 +144,21 @@ void main() {
     // activeTab was tab-3 which moved to index 0
     expect(activeTabIndex, 0);
     expect(tabs[activeTabIndex].id, 'tab-3');
+
+    // Select middle tab ('tab-2', index 1) and close the left tab ('tab-3', index 0)
+    await tester.tap(find.text('SFTP: Storage Beta'));
+    await tester.pumpAndSettle();
+    expect(activeTabIndex, 1);
+    expect(tabs[activeTabIndex].id, 'tab-2');
+
+    await tester.tap(find.byIcon(Icons.close).first);
+    await tester.pumpAndSettle();
+
+    // Verify active selection stays on 'tab-2' (now at index 0) instead of jumping to 'tab-1'
+    expect(tabs.length, 2);
+    expect(tabs[0].id, 'tab-2');
+    expect(tabs[1].id, 'tab-1');
+    expect(activeTabIndex, 0);
+    expect(tabs[activeTabIndex].id, 'tab-2');
   });
 }

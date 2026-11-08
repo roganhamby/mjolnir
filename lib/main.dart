@@ -937,11 +937,15 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
     if (removeIndex >= 0) {
       final tabToRemove = _openTabs[removeIndex];
       tabToRemove.stopTimer();
-      _stopActiveTabTimer();
+      if (removeIndex == _activeTabIndex) {
+        _stopActiveTabTimer();
+      }
       setState(() {
         _openTabs.removeAt(removeIndex);
         if (_openTabs.isEmpty) {
           _activeTabIndex = -1;
+        } else if (removeIndex < _activeTabIndex) {
+          _activeTabIndex -= 1;
         } else if (_activeTabIndex >= _openTabs.length) {
           _activeTabIndex = _openTabs.length - 1;
         }
