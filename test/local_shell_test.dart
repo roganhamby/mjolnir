@@ -4,6 +4,7 @@ import 'dart:typed_data';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:mjolnir/main.dart';
+import 'package:mjolnir/models/local_shell_preference.dart';
 import 'package:mjolnir/models/sync_vault_file.dart';
 import 'package:mjolnir/services/local_shell_service.dart';
 import 'package:mjolnir/services/sync_storage_provider.dart';
@@ -85,6 +86,12 @@ class _FakeLocalShellSession implements LocalShellSession {
 
 class _FakeLocalShellService extends LocalShellService {
   final List<_FakeLocalShellSession> sessions = [];
+  final String fakeMachineName;
+
+  _FakeLocalShellService({this.fakeMachineName = 'test-workstation'});
+
+  @override
+  String get machineName => fakeMachineName;
 
   @override
   Future<LocalShellSession> startLocalShellSession({
@@ -175,6 +182,117 @@ void main() {
       expect(fakeShellService.sessions.length, equals(1));
       expect(find.text('Local Shell (/bin/bash)'), findsOneWidget);
       expect(find.text('00:00'), findsOneWidget);
+    });
+
+    testWidgets('Saves and restores Local Shell theme and font size preferences by machine name', (tester) async {
+      tester.view.physicalSize = const Size(1280, 800);
+      tester.view.devicePixelRatio = 1.0;
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
+
+      final fakeShellServiceA = _FakeLocalShellService(fakeMachineName: 'machine-alpha');
+
+      await tester.pumpWidget(
+        MaterialApp(
+          home: MainScreen(
+            vaultManager: vaultManager,
+            localShellService: fakeShellServiceA,
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      // Open Local Shell on machine-alpha
+      await tester.tap(find.text('Local Shell'));
+      await tester.pumpAndSettle();
+
+      expect(find.text('13pt'), findsOneWidget);
+      expect(find.text('Default Dark'), findsOneWidget);
+
+      // Increase font size twice -> 15pt
+      await tester.tap(find.byTooltip('Increase Font Size'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byTooltip('Increase Font Size'));
+      await tester.pumpAndSettle();
+      expect(find.text('15pt'), findsOneWidget);
+
+      // Change ANSI theme to Dracula
+      await tester.tap(find.byTooltip('ANSI Color Scheme: Default Dark'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Dracula').last);
+      await tester.pumpAndSettle();
+      expect(find.text('Dracula'), findsOneWidget);
+
+      // Verify preference is saved in VaultManager for machine-alpha
+      final prefAlpha = vaultManager.getLocalShellPreference('machine-alpha');
+      expect(prefAlpha, isNotNull);
+      expect(prefAlpha!.terminalFontSize, equals(15.0));
+      expect(prefAlpha.terminalTheme, equals('Dracula'));
+
+      // Close the Local Shell tab
+      await tester.tap(find.byIcon(Icons.close).first);
+      await tester.pumpAndSettle();
+
+      // Re-open Local Shell on machine-alpha -> should restore 15pt and Dracula
+      await tester.tap(find.text('Local Shell'));
+      await tester.pumpAndSettle();
+      expect(find.text('15pt'), findsOneWidget);
+      expect(find.text('Dracula'), findsOneWidget);
+
+      // Now switch to a different machine (machine-beta) sharing the same vault
+      final fakeShellServiceB = _FakeLocalShellService(fakeMachineName: 'machine-beta');
+      await tester.pumpWidget(
+        MaterialApp(
+          key: const ValueKey('beta-app'),
+          home: MainScreen(
+            vaultManager: vaultManager,
+            localShellService: fakeShellServiceB,
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      // Open Local Shell on machine-beta -> starts with defaults (13pt, Default Dark)
+      await tester.tap(find.text('Local Shell'));
+      await tester.pumpAndSettle();
+      expect(find.text('13pt'), findsOneWidget);
+      expect(find.text('Default Dark'), findsOneWidget);
+
+      // Decrease font size on machine-beta -> 12pt
+      await tester.tap(find.byTooltip('Decrease Font Size'));
+      await tester.pumpAndSettle();
+      expect(find.text('12pt'), findsOneWidget);
+
+      // Both machines' preferences coexist in the vault
+      expect(vaultManager.getLocalShellPreference('machine-alpha')?.terminalFontSize, equals(15.0));
+      expect(vaultManager.getLocalShellPreference('machine-alpha')?.terminalTheme, equals('Dracula'));
+      expect(vaultManager.getLocalShellPreference('machine-beta')?.terminalFontSize, equals(12.0));
+      expect(vaultManager.getLocalShellPreference('machine-beta')?.terminalTheme, equals('Default Dark'));
+    });
+
+    test('SyncVaultFile merges per-machine local shell preferences by updatedAt and encrypts in envelope', () async {
+      await vaultManager.saveLocalShellPreference(
+        LocalShellPreference(
+          machineName: 'workstation-1',
+          terminalTheme: 'Nord',
+          terminalFontSize: 16.0,
+          updatedAt: DateTime.utc(2026, 11, 8, 10, 0),
+        ),
+      );
+
+      final exportedJson = vaultManager.exportVaultJson();
+      // Encrypted envelope should not leak machine name or theme in plaintext
+      expect(exportedJson.contains('workstation-1'), isFalse);
+
+      // Lock and re-unlock to verify envelope roundtrip
+      vaultManager.lock();
+      expect(vaultManager.localShellPreferences, isEmpty);
+
+      await vaultManager.unlock('test-password-123');
+      final restored = vaultManager.getLocalShellPreference('workstation-1');
+      expect(restored, isNotNull);
+      expect(restored!.terminalTheme, equals('Nord'));
+      expect(restored.terminalFontSize, equals(16.0));
     });
   });
 }

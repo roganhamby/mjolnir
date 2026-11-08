@@ -7,6 +7,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:file_picker/file_picker.dart';
 import 'package:intl/intl.dart';
+import 'models/local_shell_preference.dart';
 import 'models/server_config.dart';
 import 'models/task_item.dart';
 import 'models/stored_string_item.dart';
@@ -344,18 +345,40 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
     });
   }
 
+  Future<void> _saveLocalShellPrefs({
+    String? themeName,
+    double? fontSize,
+  }) async {
+    final machineName = _localShellService.machineName;
+    final existing = _vaultManager.getLocalShellPreference(machineName);
+    final updated = LocalShellPreference(
+      machineName: machineName,
+      terminalTheme: themeName ?? existing?.terminalTheme ?? 'Default Dark',
+      terminalFontSize: fontSize ?? existing?.terminalFontSize ?? 13.0,
+    );
+    await _vaultManager.saveLocalShellPreference(updated);
+  }
+
   void _openLocalShellTab() {
     _stopActiveTabTimer();
     final tabId = 'local-${DateTime.now().millisecondsSinceEpoch}';
     final username = Platform.environment['USER'] ??
         Platform.environment['USERNAME'] ??
         'local';
+    final machineName = _localShellService.machineName;
+    final savedPref = _vaultManager.getLocalShellPreference(machineName);
+    final themeToUse = (savedPref != null && savedPref.terminalTheme.isNotEmpty)
+        ? savedPref.terminalTheme
+        : 'Default Dark';
+    final fontSizeToUse = savedPref?.terminalFontSize ?? 13.0;
     final localServer = ServerConfig(
       id: 'local-shell',
       name: 'Local Shell',
-      host: 'localhost',
+      host: machineName,
       port: 0,
       username: username,
+      terminalTheme: themeToUse,
+      terminalFontSize: fontSizeToUse,
     );
     setState(() {
       _openTabs.add(
@@ -366,8 +389,8 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
           color: null,
           type: 'local',
           server: localServer,
-          themeName: 'Default Dark',
-          fontSize: 13.0,
+          themeName: themeToUse,
+          fontSize: fontSizeToUse,
         ),
       );
       _activeTabIndex = _openTabs.length - 1;
@@ -1080,11 +1103,17 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
                   tab.title = titleController.text.trim().isEmpty ? tab.title : titleController.text.trim();
                   tab.color = selectedColor;
                   tab.themeName = selectedTheme;
+                  if ((tab.type == 'local' || tab.type == 'ssh') && tab.server != null) {
+                    tab.server!.terminalTheme = selectedTheme;
+                  }
                 });
                 // Persist theme or default remote path to server config
                 try {
                   if (tab.type == 'local' && tab.server != null) {
-                    tab.server!.terminalTheme = selectedTheme;
+                    await _saveLocalShellPrefs(
+                      themeName: selectedTheme,
+                      fontSize: tab.fontSize,
+                    );
                   } else if (tab.type == 'ssh' && tab.server != null) {
                     tab.server!.terminalTheme = selectedTheme;
                     await _vaultManager.saveServer(tab.server!);
@@ -3158,14 +3187,24 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
                   onFontSizeChanged: (newSize) async {
                     t.fontSize = newSize;
                     server.terminalFontSize = newSize;
-                    if (!isLocal) {
+                    if (isLocal) {
+                      await _saveLocalShellPrefs(
+                        themeName: t.themeName,
+                        fontSize: newSize,
+                      );
+                    } else {
                       await _vaultManager.saveServer(server);
                     }
                   },
                   onThemeChanged: (newThemeName) async {
                     t.themeName = newThemeName;
                     server.terminalTheme = newThemeName;
-                    if (!isLocal) {
+                    if (isLocal) {
+                      await _saveLocalShellPrefs(
+                        themeName: newThemeName,
+                        fontSize: t.fontSize,
+                      );
+                    } else {
                       await _vaultManager.saveServer(server);
                     }
                   },

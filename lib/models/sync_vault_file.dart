@@ -1,5 +1,6 @@
 import 'dart:convert';
 import 'package:cryptography/cryptography.dart';
+import 'local_shell_preference.dart';
 import 'server_config.dart';
 import 'stored_string_item.dart';
 import 'note_item.dart';
@@ -19,6 +20,7 @@ class SyncVaultFile {
   List<StoredStringItem> storedStrings;
   List<TerminalMacroItem> macros;
   List<NoteItem> notes;
+  List<LocalShellPreference> localShellPreferences;
 
   SyncVaultFile({
     this.version = 1,
@@ -32,12 +34,14 @@ class SyncVaultFile {
     List<StoredStringItem>? storedStrings,
     List<TerminalMacroItem>? macros,
     List<NoteItem>? notes,
+    List<LocalShellPreference>? localShellPreferences,
   })  : updatedAt = updatedAt ?? DateTime.now().toUtc(),
         servers = servers ?? [],
         tasks = tasks ?? [],
         storedStrings = storedStrings ?? [],
         macros = macros ?? [],
-        notes = notes ?? [];
+        notes = notes ?? [],
+        localShellPreferences = localShellPreferences ?? [];
 
   bool get isEncryptedEnvelope => vaultPayload != null;
 
@@ -51,6 +55,7 @@ class SyncVaultFile {
       storedStrings: [],
       macros: [],
       notes: [],
+      localShellPreferences: [],
     );
   }
 
@@ -74,6 +79,8 @@ class SyncVaultFile {
           'stored_strings': storedStrings.map((s) => s.toJson()).toList(),
           'macros': macros.map((m) => m.toJson()).toList(),
           'notes': notes.map((n) => n.toJson()).toList(),
+          'local_shell_preferences':
+              localShellPreferences.map((p) => p.toJson()).toList(),
         },
       };
 
@@ -96,6 +103,10 @@ class SyncVaultFile {
     final noteList = (json['notes'] as List<dynamic>? ?? [])
         .map((e) => NoteItem.fromJson(e as Map<String, dynamic>))
         .toList();
+    final localShellPrefList =
+        (json['local_shell_preferences'] as List<dynamic>? ?? [])
+            .map((e) => LocalShellPreference.fromJson(e as Map<String, dynamic>))
+            .toList();
 
     return SyncVaultFile(
       version: json['version'] as int? ?? (vPayload != null ? 2 : 1),
@@ -112,6 +123,7 @@ class SyncVaultFile {
       storedStrings: stringList,
       macros: macroList,
       notes: noteList,
+      localShellPreferences: localShellPrefList,
     );
   }
 
@@ -148,9 +160,14 @@ class SyncVaultFile {
           .map((e) => NoteItem.fromJson(e as Map<String, dynamic>))
           .toList();
     }
+    if (decryptedMap['local_shell_preferences'] is List) {
+      localShellPreferences = (decryptedMap['local_shell_preferences'] as List)
+          .map((e) => LocalShellPreference.fromJson(e as Map<String, dynamic>))
+          .toList();
+    }
   }
 
-  /// Encrypts in-memory servers, tasks, stored_strings, macros, and notes into [vaultPayload].
+  /// Encrypts in-memory servers, tasks, stored_strings, macros, notes, and local_shell_preferences into [vaultPayload].
   Future<void> encryptPayload(CryptoVaultService cryptoService, SecretKey masterKey) async {
     final innerData = {
       'servers': servers.map((s) => s.toJson()).toList(),
@@ -158,6 +175,8 @@ class SyncVaultFile {
       'stored_strings': storedStrings.map((s) => s.toJson()).toList(),
       'macros': macros.map((m) => m.toJson()).toList(),
       'notes': notes.map((n) => n.toJson()).toList(),
+      'local_shell_preferences':
+          localShellPreferences.map((p) => p.toJson()).toList(),
     };
     vaultPayload = await cryptoService.encryptPayload(
       payload: innerData,
@@ -255,6 +274,22 @@ class SyncVaultFile {
       }
     }
 
+    final Map<String, LocalShellPreference> currentLocalPrefMap = {
+      for (var p in localShellPreferences) p.machineName: p,
+    };
+
+    for (final remotePref in remoteVault.localShellPreferences) {
+      if (!currentLocalPrefMap.containsKey(remotePref.machineName)) {
+        localShellPreferences.add(remotePref);
+      } else {
+        final localPref = currentLocalPrefMap[remotePref.machineName]!;
+        if (remotePref.updatedAt.isAfter(localPref.updatedAt)) {
+          final index = localShellPreferences.indexOf(localPref);
+          localShellPreferences[index] = remotePref;
+        }
+      }
+    }
+
     if (remoteVault.encryptedSftpSyncConfig != null &&
         (encryptedSftpSyncConfig == null ||
             remoteVault.updatedAt.isAfter(updatedAt))) {
@@ -277,6 +312,7 @@ class SyncVaultFile {
             candidate.storedStrings.isNotEmpty ||
             candidate.macros.isNotEmpty ||
             candidate.notes.isNotEmpty ||
+            candidate.localShellPreferences.isNotEmpty ||
             candidate.encryptedSftpSyncConfig != null ||
             candidate.vaultPayload != null)) {
       return true;

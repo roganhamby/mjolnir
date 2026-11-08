@@ -376,9 +376,13 @@ class _TerminalTabWidgetState extends State<TerminalTabWidget>
         }
       });
     }
-    if (oldWidget.server.terminalTheme != widget.server.terminalTheme &&
-        widget.server.terminalTheme.isNotEmpty) {
-      _currentThemeName = widget.server.terminalTheme;
+    final nextThemeName = widget.server.terminalTheme.isNotEmpty
+        ? widget.server.terminalTheme
+        : widget.initialThemeName;
+    if (nextThemeName != null &&
+        nextThemeName.isNotEmpty &&
+        nextThemeName != _currentThemeName) {
+      _currentThemeName = nextThemeName;
       _currentTheme = AnsiThemes.all[_currentThemeName] ?? TerminalThemes.defaultTheme;
     }
   }

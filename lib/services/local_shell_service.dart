@@ -539,6 +539,23 @@ class _ProcessFallbackShellSession implements LocalShellSession {
 class LocalShellService {
   const LocalShellService();
 
+  static String resolveMachineName() {
+    try {
+      final host = Platform.localHostname.trim();
+      if (host.isNotEmpty) {
+        return host;
+      }
+    } catch (_) {}
+    final envHost = Platform.environment['HOSTNAME'] ??
+        Platform.environment['COMPUTERNAME'];
+    if (envHost != null && envHost.trim().isNotEmpty) {
+      return envHost.trim();
+    }
+    return 'localhost';
+  }
+
+  String get machineName => resolveMachineName();
+
   static String resolveDefaultShell() {
     if (Platform.isWindows) {
       return Platform.environment['COMSPEC'] ?? 'powershell.exe';

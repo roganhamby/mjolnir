@@ -1,6 +1,7 @@
 import 'dart:convert';
 import 'package:flutter/foundation.dart';
 import 'package:cryptography/cryptography.dart';
+import '../models/local_shell_preference.dart';
 import '../models/server_config.dart';
 import '../models/stored_string_item.dart';
 import '../models/note_item.dart';
@@ -34,6 +35,8 @@ class VaultManager with ChangeNotifier {
   List<StoredStringItem> get storedStrings => _vault?.storedStrings ?? [];
   List<TerminalMacroItem> get macros => _vault?.macros ?? [];
   List<NoteItem> get notes => _vault?.notes ?? [];
+  List<LocalShellPreference> get localShellPreferences =>
+      _vault?.localShellPreferences ?? [];
   String? get errorMessage => _errorMessage;
   String get loadedSource => _loadedSource;
 
@@ -57,6 +60,7 @@ class VaultManager with ChangeNotifier {
                     activeVault.storedStrings.isNotEmpty ||
                     activeVault.macros.isNotEmpty ||
                     activeVault.notes.isNotEmpty ||
+                    activeVault.localShellPreferences.isNotEmpty ||
                     activeVault.encryptedSftpSyncConfig != null ||
                     activeVault.vaultPayload != null);
             if (SyncVaultFile.isNewerVault(
@@ -242,6 +246,7 @@ class VaultManager with ChangeNotifier {
       _vault!.storedStrings = [];
       _vault!.macros = [];
       _vault!.notes = [];
+      _vault!.localShellPreferences = [];
     }
     notifyListeners();
   }
@@ -347,6 +352,19 @@ class VaultManager with ChangeNotifier {
         }
       } else {
         _vault!.notes.add(item);
+      }
+    }
+
+    for (final item in importedVault.localShellPreferences) {
+      final existingIndex = _vault!.localShellPreferences
+          .indexWhere((p) => p.machineName == item.machineName);
+      if (existingIndex >= 0) {
+        if (item.updatedAt
+            .isAfter(_vault!.localShellPreferences[existingIndex].updatedAt)) {
+          _vault!.localShellPreferences[existingIndex] = item;
+        }
+      } else {
+        _vault!.localShellPreferences.add(item);
       }
     }
 
@@ -553,6 +571,39 @@ class VaultManager with ChangeNotifier {
     notifyListeners();
   }
 
+  /// Returns the saved local shell preference for [machineName], or null if none exists.
+  LocalShellPreference? getLocalShellPreference(String machineName) {
+    if (_vault == null) return null;
+    final normalized = machineName.trim();
+    for (final pref in _vault!.localShellPreferences) {
+      if (pref.machineName == normalized) {
+        return pref;
+      }
+    }
+    return null;
+  }
+
+  /// Adds or updates a local shell preference for a machine and persists the vault.
+  Future<void> saveLocalShellPreference(LocalShellPreference item) async {
+    if (!_isUnlocked || _vault == null) {
+      throw StateError(
+          'Cannot modify local shell preferences while vault is locked.');
+    }
+
+    item.updatedAt = DateTime.now().toUtc();
+    final existingIndex = _vault!.localShellPreferences
+        .indexWhere((p) => p.machineName == item.machineName);
+    if (existingIndex >= 0) {
+      _vault!.localShellPreferences[existingIndex] = item;
+    } else {
+      _vault!.localShellPreferences.add(item);
+    }
+
+    _vault!.updatedAt = DateTime.now().toUtc();
+    await _persistVault();
+    notifyListeners();
+  }
+
   /// Exports the current vault as an encrypted JSON string
   String exportVaultJson() {
     if (_vault == null) {
@@ -632,6 +683,7 @@ class VaultManager with ChangeNotifier {
             _vault!.storedStrings.isNotEmpty ||
             _vault!.macros.isNotEmpty ||
             _vault!.notes.isNotEmpty ||
+            _vault!.localShellPreferences.isNotEmpty ||
             _vault!.encryptedSftpSyncConfig != null ||
             _vault!.vaultPayload != null);
     if (_vault == null ||
