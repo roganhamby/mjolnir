@@ -106,4 +106,50 @@ class NoteItem {
           : DateTime.now().toUtc(),
     );
   }
+
+  /// Formats this note as Markdown for export.
+  /// If the title is present and not already the first H1 heading in [content],
+  /// prepends `# [title]` to the output.
+  String toMarkdown() {
+    final trimmedTitle = title.trim();
+    final trimmedContent = content.trim();
+    if (trimmedTitle.isEmpty) return content;
+    final lines = trimmedContent.split('\n');
+    final firstLine = lines.isNotEmpty ? lines.first.trim() : '';
+    if (firstLine.startsWith('# ') && firstLine.substring(2).trim().toLowerCase() == trimmedTitle.toLowerCase()) {
+      return content;
+    }
+    if (trimmedContent.isEmpty) return '# $trimmedTitle\n';
+    return '# $trimmedTitle\n\n$content';
+  }
+
+  /// Creates a [NoteItem] from imported Markdown content.
+  /// Extracts the title from the first `# ` heading if present, otherwise uses [defaultTitle].
+  static NoteItem fromMarkdown(
+    String markdown, {
+    String? defaultTitle,
+    String? id,
+    List<String>? linkedTitles,
+  }) {
+    final trimmed = markdown.trim();
+    var parsedTitle = defaultTitle?.trim() ?? '';
+    final lines = trimmed.split('\n');
+    if (lines.isNotEmpty && lines.first.trim().startsWith('# ')) {
+      final h1Title = lines.first.trim().substring(2).trim();
+      if (h1Title.isNotEmpty) {
+        parsedTitle = h1Title;
+      }
+    }
+
+    if (parsedTitle.isEmpty) {
+      parsedTitle = defaultTitle ?? 'Imported Note';
+    }
+
+    return NoteItem(
+      id: id ?? DateTime.now().millisecondsSinceEpoch.toString(),
+      title: parsedTitle,
+      content: markdown,
+      linkedTitles: linkedTitles,
+    );
+  }
 }

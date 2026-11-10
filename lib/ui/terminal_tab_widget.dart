@@ -131,11 +131,13 @@ class _TerminalSelectionController extends TerminalController {
 
   @override
   void clearSelection() {
-    if (isDesktop && !_allowInternalUpdate) {
-      return;
-    }
     _fallbackSelection = null;
-    super.clearSelection();
+    _allowInternalUpdate = true;
+    try {
+      super.clearSelection();
+    } finally {
+      _allowInternalUpdate = false;
+    }
     onSelectionUpdated?.call();
   }
 }
@@ -622,6 +624,9 @@ class _TerminalTabWidgetState extends State<TerminalTabWidget>
     }
 
     if (event.kind == PointerDeviceKind.touch) {
+      if (_terminalController.selection != null) {
+        _terminalController.forceClearSelection();
+      }
       return;
     }
 
@@ -859,8 +864,20 @@ class _TerminalTabWidgetState extends State<TerminalTabWidget>
 
   void _clearScreen() {
     terminal.eraseDisplay();
+    terminal.resetCursorStyle();
+    terminal.write('\x1b[0m');
     _terminalController.forceClearSelection();
     _requestTerminalFocus();
+  }
+
+  void _resetTerminalFormatting() {
+    terminal.resetCursorStyle();
+    terminal.write('\x1b[0m');
+    _terminalController.forceClearSelection();
+    _requestTerminalFocus();
+    if (mounted) {
+      AppNotification.show(context, message: 'Terminal formatting and highlights reset');
+    }
   }
 
   String? _detectUrlAt(Offset globalPos) {
@@ -1536,6 +1553,31 @@ class _TerminalTabWidgetState extends State<TerminalTabWidget>
           ],
         ),
       ),
+      PopupMenuItem<String>(
+        value: 'reset_formatting',
+        height: 36,
+        child: Row(
+          children: [
+            const Icon(Icons.format_clear, size: 16, color: Colors.white),
+            const SizedBox(width: 8),
+            const Text('Reset Formatting', style: TextStyle(fontSize: 13, color: Colors.white)),
+          ],
+        ),
+      ),
+      if (hasSelection)
+        PopupMenuItem<String>(
+          value: 'clear_selection',
+          height: 36,
+          child: Row(
+            children: [
+              const Icon(Icons.highlight_off, size: 16, color: Colors.white),
+              const SizedBox(width: 8),
+              const Text('Clear Selection', style: TextStyle(fontSize: 13, color: Colors.white)),
+              const Spacer(),
+              const Text('Esc', style: TextStyle(fontSize: 11, color: Colors.grey)),
+            ],
+          ),
+        ),
     ]);
 
     final selected = await showMenu<String>(
@@ -1562,6 +1604,12 @@ class _TerminalTabWidgetState extends State<TerminalTabWidget>
       _showSftpDownloadDialog(detectedFilePath);
     } else if (selected == 'copy') {
       _copySelection();
+      _terminalController.forceClearSelection();
+    } else if (selected == 'clear_selection') {
+      _terminalController.forceClearSelection();
+      _requestTerminalFocus();
+    } else if (selected == 'reset_formatting') {
+      _resetTerminalFormatting();
     } else if (selected == 'paste') {
       _pasteToTerminal();
     } else if (selected == 'paste_raw') {
@@ -1596,6 +1644,16 @@ class _TerminalTabWidgetState extends State<TerminalTabWidget>
       final isCtrl = HardwareKeyboard.instance.isControlPressed;
       final isShift = HardwareKeyboard.instance.isShiftPressed;
 
+      // Escape: if text is selected, dismiss the selection highlight
+      if (event.logicalKey == LogicalKeyboardKey.escape) {
+        if (_terminalController.selection != null) {
+          if (event is KeyDownEvent) {
+            _terminalController.forceClearSelection();
+          }
+          return KeyEventResult.handled;
+        }
+      }
+
       // Copy: Cmd+C (macOS) or Ctrl+Shift+C or (Ctrl+C if text is selected)
       if ((isMeta && event.logicalKey == LogicalKeyboardKey.keyC) ||
           (isCtrl && isShift && event.logicalKey == LogicalKeyboardKey.keyC)) {
@@ -1615,6 +1673,10 @@ class _TerminalTabWidgetState extends State<TerminalTabWidget>
         }
         if (event is KeyRepeatEvent && _consumedCopyOnCtrlCDown) {
           return KeyEventResult.handled;
+        }
+        if (event is KeyDownEvent) {
+          // Reset local cursor style so interrupted commands don't leave underline/colors lingering.
+          terminal.resetCursorStyle();
         }
       }
 
@@ -2842,6 +2904,9 @@ Total Characters Logged: $_screenLogBytesWritten
                 shortcuts: const <ShortcutActivator, Intent>{},
                 onKeyEvent: _handleTerminalKeyEvent,
                 onTapUp: (details, offset) {
+                  if (_pointerClickCount == 1 && _terminalController.selection != null) {
+                    _terminalController.forceClearSelection();
+                  }
                   if (!_terminalFocusNode.hasFocus) {
                     _terminalFocusNode.requestFocus();
                   }

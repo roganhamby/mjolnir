@@ -144,4 +144,85 @@ void main() {
     await NoteEditorPanel.flushAll();
     expect(saved.last, 'pending');
   });
+
+  group('Markdown import / export and preview', () {
+    test('toMarkdown adds title heading when not already present', () {
+      final note1 = NoteItem(id: 'n1', title: 'Deploy Runbook', content: 'step 1\nstep 2');
+      expect(note1.toMarkdown(), '# Deploy Runbook\n\nstep 1\nstep 2');
+
+      final note2 = NoteItem(id: 'n2', title: 'Deploy Runbook', content: '# Deploy Runbook\n\nstep 1\nstep 2');
+      expect(note2.toMarkdown(), '# Deploy Runbook\n\nstep 1\nstep 2');
+
+      final note3 = NoteItem(id: 'n3', title: '', content: 'just raw content');
+      expect(note3.toMarkdown(), 'just raw content');
+    });
+
+    test('fromMarkdown extracts title from H1 or falls back to defaultTitle', () {
+      const mdWithH1 = '# Database Migration Guide\n\nRun the migration scripts carefully.';
+      final note1 = NoteItem.fromMarkdown(mdWithH1, defaultTitle: 'fallback');
+      expect(note1.title, 'Database Migration Guide');
+      expect(note1.content, mdWithH1);
+
+      const mdWithoutH1 = 'Just steps without a top level heading.';
+      final note2 = NoteItem.fromMarkdown(mdWithoutH1, defaultTitle: 'imported_file');
+      expect(note2.title, 'imported_file');
+      expect(note2.content, mdWithoutH1);
+    });
+
+    testWidgets('NoteMarkdownPreview renders markdown blocks and checklists', (tester) async {
+      int? toggledIndex;
+      const sample = '# Heading One\n\n> Important quote\n\n- [ ] Pending task\n- [x] Done task\n\n```bash\necho "hello"\n```';
+
+      await tester.pumpWidget(MaterialApp(
+        theme: AppColorSchemes.mjolnirAmber.toThemeData(),
+        home: Scaffold(
+          body: NoteMarkdownPreview(
+            content: sample,
+            onToggleTask: (idx) => toggledIndex = idx,
+          ),
+        ),
+      ));
+
+      expect(find.textContaining('Heading One'), findsOneWidget);
+      expect(find.textContaining('Important quote'), findsOneWidget);
+      expect(find.textContaining('Pending task'), findsOneWidget);
+      expect(find.textContaining('Done task'), findsOneWidget);
+      expect(find.byType(Checkbox), findsNWidgets(2));
+      expect(find.textContaining('echo "hello"'), findsOneWidget);
+
+      // Tap the first checkbox to test callback
+      await tester.tap(find.byType(Checkbox).first);
+      expect(toggledIndex, 4); // Line index of pending task
+    });
+
+    testWidgets('NoteEditorPanel switches view modes and toggles preview', (tester) async {
+      final note = NoteItem(id: 'n_view', title: 'Test View Modes', content: '# Preview Heading\n- Item 1');
+
+      await tester.pumpWidget(MaterialApp(
+        theme: AppColorSchemes.mjolnirAmber.toThemeData(),
+        home: Scaffold(
+          body: NoteEditorPanel(
+            note: note,
+            onSave: (_) async {},
+          ),
+        ),
+      ));
+
+      // Initial state is edit mode (TextField visible)
+      expect(find.byType(TextField), findsNWidgets(2)); // Title and Content
+
+      // Switch to Preview mode
+      await tester.tap(find.byTooltip('Preview Markdown'));
+      await tester.pumpAndSettle();
+
+      // In Preview mode, NoteMarkdownPreview is visible and Content TextField is replaced
+      expect(find.byType(NoteMarkdownPreview), findsOneWidget);
+      expect(find.textContaining('Preview Heading'), findsOneWidget);
+
+      // Switch back to Edit mode
+      await tester.tap(find.byTooltip('Edit Mode'));
+      await tester.pumpAndSettle();
+      expect(find.byType(TextField), findsNWidgets(2));
+    });
+  });
 }
