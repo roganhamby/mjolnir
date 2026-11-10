@@ -2826,7 +2826,12 @@ Total Characters Logged: $_screenLogBytesWritten
                 controller: _terminalController,
                 scrollController: _scrollController,
                 focusNode: _terminalFocusNode,
-                padding: EdgeInsets.zero,
+                padding: const EdgeInsets.only(
+                  left: 4,
+                  right: 4,
+                  top: 2,
+                  bottom: 8,
+                ),
                 autofocus: true,
                 hardwareKeyboardOnly: Platform.isWindows || Platform.isLinux || Platform.isMacOS,
                 theme: _currentTheme,

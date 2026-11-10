@@ -328,7 +328,7 @@ class _NoteEditorPanelState extends State<NoteEditorPanel> {
           // Body
           Expanded(
             child: Padding(
-              padding: const EdgeInsets.fromLTRB(12, 4, 8, 0),
+              padding: const EdgeInsets.fromLTRB(12, 4, 8, 8),
               child: TextField(
                 controller: _contentController,
                 focusNode: _contentFocus,
