@@ -161,4 +161,168 @@ void main() {
     expect(activeTabIndex, 0);
     expect(tabs[activeTabIndex].id, 'tab-2');
   });
+
+  testWidgets('Tab reorder and close safeguards prevent accidental tab closure', (tester) async {
+    final tabs = [
+      TestTab(id: 'tab-1', title: 'Tab 1'),
+      TestTab(id: 'tab-2', title: 'Tab 2'),
+      TestTab(id: 'tab-3', title: 'Tab 3'),
+    ];
+    int activeTabIndex = 0;
+    bool isReordering = false;
+    DateTime? lastReorderEndTime;
+    DateTime? lastTabClosedTime;
+
+    void closeTab(String tabId) {
+      if (isReordering) return;
+      final now = DateTime.now();
+      if (lastReorderEndTime != null &&
+          now.difference(lastReorderEndTime!) < const Duration(milliseconds: 350)) {
+        return;
+      }
+      if (lastTabClosedTime != null &&
+          now.difference(lastTabClosedTime!) < const Duration(milliseconds: 350)) {
+        return;
+      }
+      final removeIndex = tabs.indexWhere((t) => t.id == tabId);
+      if (removeIndex >= 0) {
+        tabs.removeAt(removeIndex);
+        lastTabClosedTime = DateTime.now();
+        if (tabs.isEmpty) {
+          activeTabIndex = -1;
+        } else if (removeIndex < activeTabIndex) {
+          activeTabIndex -= 1;
+        } else if (activeTabIndex >= tabs.length) {
+          activeTabIndex = tabs.length - 1;
+        }
+      }
+    }
+
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: StatefulBuilder(
+            builder: (context, setState) {
+              return SizedBox(
+                height: 38,
+                child: ReorderableListView.builder(
+                  scrollDirection: Axis.horizontal,
+                  buildDefaultDragHandles: false,
+                  itemCount: tabs.length,
+                  onReorderStart: (int index) {
+                    setState(() {
+                      isReordering = true;
+                    });
+                  },
+                  onReorderEnd: (int index) {
+                    setState(() {
+                      isReordering = false;
+                      lastReorderEndTime = DateTime.now();
+                    });
+                  },
+                  onReorder: (int oldIndex, int newIndex) {
+                    if (oldIndex < 0 || oldIndex >= tabs.length) return;
+                    setState(() {
+                      isReordering = false;
+                      lastReorderEndTime = DateTime.now();
+                      if (oldIndex < newIndex) {
+                        newIndex -= 1;
+                      }
+                      final activeTabId = (activeTabIndex >= 0 && activeTabIndex < tabs.length)
+                          ? tabs[activeTabIndex].id
+                          : null;
+                      final movedTab = tabs.removeAt(oldIndex);
+                      final targetIndex = newIndex.clamp(0, tabs.length);
+                      tabs.insert(targetIndex, movedTab);
+                      if (activeTabId != null) {
+                        activeTabIndex = tabs.indexWhere((t) => t.id == activeTabId);
+                      }
+                    });
+                  },
+                  proxyDecorator: (Widget child, int index, Animation<double> animation) {
+                    return Material(
+                      color: Colors.transparent,
+                      child: IgnorePointer(child: child),
+                    );
+                  },
+                  itemBuilder: (context, index) {
+                    final tab = tabs[index];
+                    return Container(
+                      key: ValueKey(tab.id),
+                      child: Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          ReorderableDragStartListener(
+                            index: index,
+                            child: Text(tab.title),
+                          ),
+                          IconButton(
+                            icon: const Icon(Icons.close, size: 14),
+                            onPressed: isReordering
+                                ? null
+                                : () {
+                                    setState(() {
+                                      closeTab(tab.id);
+                                    });
+                                  },
+                          ),
+                        ],
+                      ),
+                    );
+                  },
+                ),
+              );
+            },
+          ),
+        ),
+      ),
+    );
+
+    // Initial state: 3 tabs
+    expect(tabs.length, 3);
+
+    // Test 1: Rapid succession double-tap close (simulating mouse click bounce / rapid double click)
+    // Tapping close on the first tab once closes Tab 1
+    await tester.tap(find.byIcon(Icons.close).first);
+    await tester.pump();
+    expect(tabs.length, 2);
+    expect(tabs[0].id, 'tab-2');
+
+    // Immediate second tap on the now-first close button (within 350ms debounce window) is ignored
+    await tester.tap(find.byIcon(Icons.close).first);
+    await tester.pump();
+    expect(tabs.length, 2, reason: 'Rapid second close tap must be debounced to prevent closing shifted tab');
+
+    // Wait past debounce duration
+    await tester.runAsync(() async {
+      await Future<void>.delayed(const Duration(milliseconds: 400));
+    });
+    await tester.pumpAndSettle();
+
+    // Test 2: Moving a tab does not accidentally close any tab
+    await tester.drag(find.byType(ReorderableDragStartListener).first, const Offset(250, 0));
+    await tester.pumpAndSettle();
+
+    // Verify tabs reordered properly
+    expect(tabs.length, 2);
+    expect(tabs[0].id, 'tab-3');
+    expect(tabs[1].id, 'tab-2');
+
+    // Immediate close click right after drop within reorder cooldown is ignored
+    await tester.tap(find.byIcon(Icons.close).first);
+    await tester.pump();
+    expect(tabs.length, 2, reason: 'Drop coordinate release / immediate tap right after drop must not close tab');
+
+    // Wait past reorder cooldown
+    await tester.runAsync(() async {
+      await Future<void>.delayed(const Duration(milliseconds: 400));
+    });
+    await tester.pumpAndSettle();
+
+    // Normal deliberate close now succeeds
+    await tester.tap(find.byIcon(Icons.close).first);
+    await tester.pumpAndSettle();
+    expect(tabs.length, 1);
+    expect(tabs[0].id, 'tab-2');
+  });
 }

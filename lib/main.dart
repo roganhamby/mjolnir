@@ -189,6 +189,9 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
   final List<TabItem> _openTabs = [];
   int _activeTabIndex = -1;
   bool _isSidebarCollapsed = false;
+  bool _isReordering = false;
+  DateTime? _lastReorderEndTime;
+  DateTime? _lastTabClosedTime;
   Timer? _dueDateTimer;
 
   final TextEditingController _masterPasswordController = TextEditingController();
@@ -922,7 +925,20 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
     }
   }
 
-  Future<void> _closeTab(String tabId) async {
+  Future<void> _closeTab(String tabId, {bool isInternalExit = false}) async {
+    if (!isInternalExit) {
+      if (_isReordering) return;
+      final now = DateTime.now();
+      if (_lastReorderEndTime != null &&
+          now.difference(_lastReorderEndTime!) < const Duration(milliseconds: 350)) {
+        return;
+      }
+      if (_lastTabClosedTime != null &&
+          now.difference(_lastTabClosedTime!) < const Duration(milliseconds: 350)) {
+        return;
+      }
+    }
+
     final index = _openTabs.indexWhere((t) => t.id == tabId);
     if (index < 0) return;
 
@@ -964,6 +980,7 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
         _stopActiveTabTimer();
       }
       setState(() {
+        _lastTabClosedTime = DateTime.now();
         _openTabs.removeAt(removeIndex);
         if (_openTabs.isEmpty) {
           _activeTabIndex = -1;
@@ -2889,8 +2906,22 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
                   scrollDirection: Axis.horizontal,
                   buildDefaultDragHandles: false,
                   itemCount: _openTabs.length,
-                  onReorder: (int oldIndex, int newIndex) {
+                  onReorderStart: (int index) {
                     setState(() {
+                      _isReordering = true;
+                    });
+                  },
+                  onReorderEnd: (int index) {
+                    setState(() {
+                      _isReordering = false;
+                      _lastReorderEndTime = DateTime.now();
+                    });
+                  },
+                  onReorder: (int oldIndex, int newIndex) {
+                    if (oldIndex < 0 || oldIndex >= _openTabs.length) return;
+                    setState(() {
+                      _isReordering = false;
+                      _lastReorderEndTime = DateTime.now();
                       if (oldIndex < newIndex) {
                         newIndex -= 1;
                       }
@@ -2898,7 +2929,8 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
                           ? _openTabs[_activeTabIndex].id
                           : null;
                       final movedTab = _openTabs.removeAt(oldIndex);
-                      _openTabs.insert(newIndex, movedTab);
+                      final targetIndex = newIndex.clamp(0, _openTabs.length);
+                      _openTabs.insert(targetIndex, movedTab);
                       if (activeTabId != null) {
                         _activeTabIndex = _openTabs.indexWhere((t) => t.id == activeTabId);
                       }
@@ -2913,7 +2945,7 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
                           color: Colors.transparent,
                           shadowColor: Colors.black54,
                           elevation: elevation,
-                          child: child,
+                          child: IgnorePointer(child: child),
                         );
                       },
                       child: child,
@@ -3073,7 +3105,7 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
                             padding: const EdgeInsets.only(right: 4),
                             child: InkWell(
                               borderRadius: BorderRadius.circular(3),
-                              onTap: () => _renameAndRecolorTab(tab),
+                              onTap: _isReordering ? null : () => _renameAndRecolorTab(tab),
                               child: Padding(
                                 padding: const EdgeInsets.all(4.0),
                                 child: Icon(Icons.edit, size: 12, color: scheme.mutedText),
@@ -3084,7 +3116,7 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
                             padding: const EdgeInsets.only(right: 8),
                             child: InkWell(
                               borderRadius: BorderRadius.circular(3),
-                              onTap: () => _closeTab(tab.id),
+                              onTap: _isReordering ? null : () => _closeTab(tab.id),
                               child: Padding(
                                 padding: const EdgeInsets.all(4.0),
                                 child: Icon(Icons.close, size: 14, color: scheme.mutedText),
@@ -3208,7 +3240,7 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
                       await _vaultManager.saveServer(server);
                     }
                   },
-                  onClose: () => _closeTab(t.id),
+                  onClose: () => _closeTab(t.id, isInternalExit: true),
                   timerWidget: _buildTabTimerWidget(t, tabIndex, tabIndex == _activeTabIndex, scheme),
                 ), scheme);
               } else {
