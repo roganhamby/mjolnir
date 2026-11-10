@@ -18,6 +18,7 @@ import '../services/local_shell_service.dart';
 import '../services/ssh_service.dart';
 import '../services/known_hosts_service.dart';
 import '../services/terminal_macro_service.dart';
+import '../services/terminal_clipboard_sanitizer.dart';
 import '../models/terminal_macro_item.dart';
 import '../theme/ansi_themes.dart';
 import '../theme/app_color_schemes.dart';
@@ -822,13 +823,16 @@ class _TerminalTabWidgetState extends State<TerminalTabWidget>
     _requestTerminalFocus();
   }
 
-  Future<void> _pasteToTerminal() async {
+  Future<void> _pasteToTerminal({bool sanitize = true}) async {
     final data = await Clipboard.getData(Clipboard.kTextPlain);
     final text = data?.text;
     if (text != null && text.isNotEmpty) {
+      // Sanitize AI / web copy artifacts (e.g. \vert{}, \backslash, smart quotes,
+      // invisible unicode, rogue control chars) unless raw paste is requested.
+      final cleanText = sanitize ? TerminalClipboardSanitizer.sanitize(text) : text;
       // Normalize Windows CRLF (\r\n) and LF (\n) to CR (\r) so GNU screen,
       // vim, and remote PTYs do not insert double newlines or literal ^M.
-      final normalized = text.replaceAll('\r\n', '\r').replaceAll('\n', '\r');
+      final normalized = cleanText.replaceAll('\r\n', '\r').replaceAll('\n', '\r');
       // Send via textInput rather than bracketed paste (\x1b[200~...\x1b[201~)
       // so pasting works reliably inside GNU screen sessions as well as shells
       // and editors.
@@ -1473,6 +1477,22 @@ class _TerminalTabWidgetState extends State<TerminalTabWidget>
         ),
       ),
       PopupMenuItem<String>(
+        value: 'paste_raw',
+        height: 36,
+        child: Row(
+          children: [
+            const Icon(Icons.content_paste_go, size: 16, color: Colors.white),
+            const SizedBox(width: 8),
+            const Text('Paste Raw', style: TextStyle(fontSize: 13, color: Colors.white)),
+            const Spacer(),
+            const Text(
+              'Unfiltered',
+              style: TextStyle(fontSize: 11, color: Colors.grey),
+            ),
+          ],
+        ),
+      ),
+      PopupMenuItem<String>(
         value: 'send_lnext',
         height: 36,
         child: Row(
@@ -1544,6 +1564,11 @@ class _TerminalTabWidgetState extends State<TerminalTabWidget>
       _copySelection();
     } else if (selected == 'paste') {
       _pasteToTerminal();
+    } else if (selected == 'paste_raw') {
+      _pasteToTerminal(sanitize: false);
+      if (mounted) {
+        AppNotification.show(context, message: 'Pasted raw clipboard text without filtering');
+      }
     } else if (selected == 'send_lnext') {
       _sendRawToShell([0x16]);
       if (mounted) {
