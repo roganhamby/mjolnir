@@ -371,6 +371,10 @@ class _TerminalTabWidgetState extends State<TerminalTabWidget>
           _syncRemotePtySize();
         }
       });
+    } else if (oldWidget.isActive && !widget.isActive) {
+      if (_terminalFocusNode.hasFocus) {
+        _terminalFocusNode.unfocus();
+      }
     }
     if (oldWidget.fontSize != widget.fontSize) {
       _fontSize = widget.fontSize;

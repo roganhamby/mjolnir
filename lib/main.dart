@@ -3138,143 +3138,160 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
         ),
         // Active Tab View Content
         Expanded(
-          child: IndexedStack(
-            index: _activeTabIndex >= 0 ? _activeTabIndex : 0,
-            children: _openTabs.asMap().entries.map((entry) {
-              final tabIndex = entry.key;
-              final t = entry.value;
-              final assignedTask = (t.type == 'ssh' || t.type == 'sftp' || t.type == 'local')
-                  ? _getAssignedTaskForTab(t.id)
-                  : null;
+          child: _openTabs.isEmpty
+              ? const SizedBox.shrink()
+              : Stack(
+                  fit: StackFit.expand,
+                  children: _openTabs.asMap().entries.map((entry) {
+                    final tabIndex = entry.key;
+                    final t = entry.value;
+                    final isCurrentActive = tabIndex == _activeTabIndex;
+                    final assignedTask = (t.type == 'ssh' || t.type == 'sftp' || t.type == 'local')
+                        ? _getAssignedTaskForTab(t.id)
+                        : null;
 
-              if (t.type == 'tasks') {
-                return TaskManagerTabWidget(
-                  key: ValueKey(t.id),
-                  tasks: _vaultManager.tasks,
-                  availableTabs: assignableTabs,
-                  onSaveTask: (task) async {
-                    await _vaultManager.saveTask(task);
-                    if (mounted) setState(() {});
-                  },
-                  onCompleteTask: _completeTask,
-                  onAssignTaskToTab: _assignTaskToTab,
-                );
-              } else if (t.type == 'strings') {
-                return StoredStringsTabWidget(
-                  key: ValueKey(t.id),
-                  storedStrings: _vaultManager.storedStrings,
-                  onSaveStoredString: (item) async {
-                    await _vaultManager.saveStoredString(item);
-                    if (mounted) setState(() {});
-                  },
-                  onDeleteStoredString: (id) async {
-                    await _vaultManager.deleteStoredString(id);
-                    if (mounted) setState(() {});
-                  },
-                );
-              } else if (t.type == 'macros') {
-                return MacrosTabWidget(
-                  key: ValueKey(t.id),
-                  macros: _vaultManager.macros,
-                  onSaveMacro: (macro) async {
-                    await _vaultManager.saveMacro(macro);
-                    if (mounted) setState(() {});
-                  },
-                  onDeleteMacro: (id) async {
-                    await _vaultManager.deleteMacro(id);
-                    if (mounted) setState(() {});
-                  },
-                );
-              } else if (t.type == 'notes') {
-                return NotesTabWidget(
-                  key: ValueKey(t.id),
-                  notes: _vaultManager.notes,
-                  selectedNoteId: _selectedNoteId,
-                  onSelectNote: (id) => setState(() => _selectedNoteId = id),
-                  onSaveNote: _saveNote,
-                  onDeleteNote: _deleteNote,
-                  suggestedLinkTitles: _sessionTabTitles,
-                );
-              } else if (t.type == 'ssh' || t.type == 'local') {
-                final server = t.server!;
-                final isLocal = t.type == 'local';
-                return _wrapWithNotePanel(t, TerminalTabWidget(
-                  key: ValueKey(t.id),
-                  server: server,
-                  sshService: _sshService,
-                  isLocalShell: isLocal,
-                  localShellService: _localShellService,
-                  getMacros: () => _vaultManager.macros,
-                  theme: AnsiThemes.all[server.terminalTheme] ?? AnsiThemes.all[t.themeName] ?? TerminalThemes.defaultTheme,
-                  initialThemeName: server.terminalTheme.isNotEmpty ? server.terminalTheme : t.themeName,
-                  fontSize: t.fontSize,
-                  isActive: tabIndex == _activeTabIndex,
-                  assignedTask: assignedTask,
-                  onCompleteAssignedTask: assignedTask != null
-                      ? () => _completeTask(assignedTask.id)
-                      : null,
-                  onUnassignTask: assignedTask != null
-                      ? () => _assignTaskToTab(assignedTask, null)
-                      : null,
-                  onAssignedTaskChanged: (updatedTask) async {
-                    await _vaultManager.saveTask(updatedTask);
-                    if (mounted) setState(() {});
-                  },
-                  onFontSizeChanged: (newSize) async {
-                    t.fontSize = newSize;
-                    server.terminalFontSize = newSize;
-                    if (isLocal) {
-                      await _saveLocalShellPrefs(
-                        themeName: t.themeName,
-                        fontSize: newSize,
+                    Widget tabContent;
+                    if (t.type == 'tasks') {
+                      tabContent = TaskManagerTabWidget(
+                        key: ValueKey(t.id),
+                        tasks: _vaultManager.tasks,
+                        availableTabs: assignableTabs,
+                        onSaveTask: (task) async {
+                          await _vaultManager.saveTask(task);
+                          if (mounted) setState(() {});
+                        },
+                        onCompleteTask: _completeTask,
+                        onAssignTaskToTab: _assignTaskToTab,
                       );
-                    } else {
-                      await _vaultManager.saveServer(server);
-                    }
-                  },
-                  onThemeChanged: (newThemeName) async {
-                    t.themeName = newThemeName;
-                    server.terminalTheme = newThemeName;
-                    if (isLocal) {
-                      await _saveLocalShellPrefs(
-                        themeName: newThemeName,
+                    } else if (t.type == 'strings') {
+                      tabContent = StoredStringsTabWidget(
+                        key: ValueKey(t.id),
+                        storedStrings: _vaultManager.storedStrings,
+                        onSaveStoredString: (item) async {
+                          await _vaultManager.saveStoredString(item);
+                          if (mounted) setState(() {});
+                        },
+                        onDeleteStoredString: (id) async {
+                          await _vaultManager.deleteStoredString(id);
+                          if (mounted) setState(() {});
+                        },
+                      );
+                    } else if (t.type == 'macros') {
+                      tabContent = MacrosTabWidget(
+                        key: ValueKey(t.id),
+                        macros: _vaultManager.macros,
+                        onSaveMacro: (macro) async {
+                          await _vaultManager.saveMacro(macro);
+                          if (mounted) setState(() {});
+                        },
+                        onDeleteMacro: (id) async {
+                          await _vaultManager.deleteMacro(id);
+                          if (mounted) setState(() {});
+                        },
+                      );
+                    } else if (t.type == 'notes') {
+                      tabContent = NotesTabWidget(
+                        key: ValueKey(t.id),
+                        notes: _vaultManager.notes,
+                        selectedNoteId: _selectedNoteId,
+                        onSelectNote: (id) => setState(() => _selectedNoteId = id),
+                        onSaveNote: _saveNote,
+                        onDeleteNote: _deleteNote,
+                        suggestedLinkTitles: _sessionTabTitles,
+                      );
+                    } else if (t.type == 'ssh' || t.type == 'local') {
+                      final server = t.server!;
+                      final isLocal = t.type == 'local';
+                      tabContent = _wrapWithNotePanel(t, TerminalTabWidget(
+                        key: ValueKey(t.id),
+                        server: server,
+                        sshService: _sshService,
+                        isLocalShell: isLocal,
+                        localShellService: _localShellService,
+                        getMacros: () => _vaultManager.macros,
+                        theme: AnsiThemes.all[server.terminalTheme] ?? AnsiThemes.all[t.themeName] ?? TerminalThemes.defaultTheme,
+                        initialThemeName: server.terminalTheme.isNotEmpty ? server.terminalTheme : t.themeName,
                         fontSize: t.fontSize,
-                      );
+                        isActive: isCurrentActive,
+                        assignedTask: assignedTask,
+                        onCompleteAssignedTask: assignedTask != null
+                            ? () => _completeTask(assignedTask.id)
+                            : null,
+                        onUnassignTask: assignedTask != null
+                            ? () => _assignTaskToTab(assignedTask, null)
+                            : null,
+                        onAssignedTaskChanged: (updatedTask) async {
+                          await _vaultManager.saveTask(updatedTask);
+                          if (mounted) setState(() {});
+                        },
+                        onFontSizeChanged: (newSize) async {
+                          t.fontSize = newSize;
+                          server.terminalFontSize = newSize;
+                          if (isLocal) {
+                            await _saveLocalShellPrefs(
+                              themeName: t.themeName,
+                              fontSize: newSize,
+                            );
+                          } else {
+                            await _vaultManager.saveServer(server);
+                          }
+                        },
+                        onThemeChanged: (newThemeName) async {
+                          t.themeName = newThemeName;
+                          server.terminalTheme = newThemeName;
+                          if (isLocal) {
+                            await _saveLocalShellPrefs(
+                              themeName: newThemeName,
+                              fontSize: t.fontSize,
+                            );
+                          } else {
+                            await _vaultManager.saveServer(server);
+                          }
+                        },
+                        onClose: () => _closeTab(t.id, isInternalExit: true),
+                        timerWidget: _buildTabTimerWidget(t, tabIndex, isCurrentActive, scheme),
+                      ), scheme);
                     } else {
-                      await _vaultManager.saveServer(server);
+                      final server = t.server!;
+                      tabContent = _wrapWithNotePanel(t, SftpTabWidget(
+                        key: ValueKey(t.id),
+                        server: server,
+                        sshService: _sshService,
+                        assignedTask: assignedTask,
+                        onCompleteAssignedTask: assignedTask != null
+                            ? () => _completeTask(assignedTask.id)
+                            : null,
+                        onUnassignTask: assignedTask != null
+                            ? () => _assignTaskToTab(assignedTask, null)
+                            : null,
+                        onAssignedTaskChanged: (updatedTask) async {
+                          await _vaultManager.saveTask(updatedTask);
+                          if (mounted) setState(() {});
+                        },
+                        onDefaultRemotePathChanged: (newDefaultPath) async {
+                          server.defaultRemotePath = newDefaultPath;
+                          server.customRemotePathSet =
+                              newDefaultPath != '~/' && newDefaultPath != '~';
+                          await _vaultManager.saveServer(server);
+                          if (mounted) setState(() {});
+                        },
+                      ), scheme);
                     }
-                  },
-                  onClose: () => _closeTab(t.id, isInternalExit: true),
-                  timerWidget: _buildTabTimerWidget(t, tabIndex, tabIndex == _activeTabIndex, scheme),
-                ), scheme);
-              } else {
-                final server = t.server!;
-                return _wrapWithNotePanel(t, SftpTabWidget(
-                  key: ValueKey(t.id),
-                  server: server,
-                  sshService: _sshService,
-                  assignedTask: assignedTask,
-                  onCompleteAssignedTask: assignedTask != null
-                      ? () => _completeTask(assignedTask.id)
-                      : null,
-                  onUnassignTask: assignedTask != null
-                      ? () => _assignTaskToTab(assignedTask, null)
-                      : null,
-                  onAssignedTaskChanged: (updatedTask) async {
-                    await _vaultManager.saveTask(updatedTask);
-                    if (mounted) setState(() {});
-                  },
-                  onDefaultRemotePathChanged: (newDefaultPath) async {
-                    server.defaultRemotePath = newDefaultPath;
-                    server.customRemotePathSet =
-                        newDefaultPath != '~/' && newDefaultPath != '~';
-                    await _vaultManager.saveServer(server);
-                    if (mounted) setState(() {});
-                  },
-                ), scheme);
-              }
-            }).toList(),
-          ),
+
+                    return Offstage(
+                      key: ValueKey('tab-offstage-${t.id}'),
+                      offstage: !isCurrentActive,
+                      child: TickerMode(
+                        enabled: isCurrentActive,
+                        child: Focus(
+                          canRequestFocus: isCurrentActive,
+                          skipTraversal: !isCurrentActive,
+                          child: tabContent,
+                        ),
+                      ),
+                    );
+                  }).toList(),
+                ),
         ),
       ],
     );
