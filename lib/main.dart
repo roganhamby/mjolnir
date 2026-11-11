@@ -2954,7 +2954,9 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
                   itemBuilder: (context, index) {
                     final tab = _openTabs[index];
                     final isActive = index == _activeTabIndex;
-                    final tabHighlightColor = tab.color ?? (isActive ? scheme.accentColor : Colors.transparent);
+                    final tabHighlightColor = isActive
+                        ? (tab.color ?? scheme.accentColor)
+                        : Colors.transparent;
                     final assignedTask = (tab.type == 'ssh' || tab.type == 'sftp' || tab.type == 'local')
                         ? _getAssignedTaskForTab(tab.id)
                         : null;
@@ -3010,7 +3012,9 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
                                             height: 8,
                                             margin: const EdgeInsets.only(right: 6),
                                             decoration: BoxDecoration(
-                                              color: tab.color,
+                                              color: isActive
+                                                  ? tab.color
+                                                  : tab.color!.withValues(alpha: 0.4),
                                               shape: BoxShape.circle,
                                             ),
                                           ),
