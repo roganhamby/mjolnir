@@ -177,6 +177,7 @@ class _TerminalTabWidgetState extends State<TerminalTabWidget>
   DateTime? _lastPointerDownTime;
   Offset? _lastPointerDownPosition;
   int _pointerClickCount = 0;
+  bool _lastChunkEndedWithCR = false;
 
   // Screen logging state
   bool _isScreenLogging = false;
@@ -478,6 +479,29 @@ class _TerminalTabWidgetState extends State<TerminalTabWidget>
         '',
       );
     }
+
+    if (!terminal.isUsingAltBuffer && processed.contains('\n')) {
+      // In main buffer mode (shell command outputs, scripts, stderr), normalize
+      // standalone \n (not preceded by \r) to \r\n, mirroring kernel PTY ONLCR
+      // line discipline to eliminate the terminal "staircase effect" where the
+      // next line starts at the previous line's end column.
+      final buffer = StringBuffer();
+      for (var i = 0; i < processed.length; i++) {
+        final char = processed[i];
+        if (char == '\n') {
+          final isPrecededByCR = i > 0
+              ? processed.codeUnitAt(i - 1) == 0x0D
+              : _lastChunkEndedWithCR;
+          if (!isPrecededByCR) {
+            buffer.write('\r');
+          }
+        }
+        buffer.write(char);
+      }
+      processed = buffer.toString();
+    }
+    _lastChunkEndedWithCR = processed.isNotEmpty &&
+        processed.codeUnitAt(processed.length - 1) == 0x0D;
 
     terminal.write(processed);
 
@@ -1987,6 +2011,7 @@ Total Characters Logged: $_screenLogBytesWritten
     _lastSyncedHeight = 0;
     _lastSyncedPixelWidth = 0;
     _lastSyncedPixelHeight = 0;
+    _lastChunkEndedWithCR = false;
 
     setState(() {
       _isLoading = true;

@@ -135,6 +135,36 @@ void main() {
       expect(uri, isNotNull);
       expect(Uri.decodeComponent(uri!.path), '/home/user/projects/mjolnir');
     });
+
+    test('Normalizes standalone line feed to carriage return + line feed (ONLCR)', () {
+      String normalizeNewlines(String input, {bool lastChunkEndedWithCR = false}) {
+        if (!input.contains('\n')) return input;
+        final buffer = StringBuffer();
+        for (var i = 0; i < input.length; i++) {
+          final char = input[i];
+          if (char == '\n') {
+            final isPrecededByCR = i > 0
+                ? input.codeUnitAt(i - 1) == 0x0D
+                : lastChunkEndedWithCR;
+            if (!isPrecededByCR) {
+              buffer.write('\r');
+            }
+          }
+          buffer.write(char);
+        }
+        return buffer.toString();
+      }
+
+      // Standalone LF becomes CRLF
+      expect(normalizeNewlines("line1\nline2"), "line1\r\nline2");
+      // Existing CRLF remains unchanged
+      expect(normalizeNewlines("line1\r\nline2"), "line1\r\nline2");
+      // Multi-line mixed CRLF and LF
+      expect(normalizeNewlines("line1\nline2\r\nline3\n"), "line1\r\nline2\r\nline3\r\n");
+      // Cross-chunk boundary with CR at end of first chunk
+      expect(normalizeNewlines("\nsecond chunk", lastChunkEndedWithCR: true), "\nsecond chunk");
+      expect(normalizeNewlines("\nsecond chunk", lastChunkEndedWithCR: false), "\r\nsecond chunk");
+    });
   });
 }
 

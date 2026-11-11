@@ -1,16 +1,12 @@
-import 'dart:async';
 import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
-import 'package:mjolnir/models/server_config.dart';
 import 'package:mjolnir/models/terminal_macro_item.dart';
 import 'package:mjolnir/models/sync_vault_file.dart';
 import 'package:mjolnir/services/crypto_vault_service.dart';
-import 'package:mjolnir/services/ssh_service.dart';
 import 'package:mjolnir/services/terminal_macro_service.dart';
 import 'package:mjolnir/ui/macros_tab_widget.dart';
-import 'package:mjolnir/ui/terminal_tab_widget.dart';
 import 'package:mjolnir/theme/app_color_schemes.dart';
 
 void main() {

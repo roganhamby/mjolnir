@@ -684,7 +684,7 @@ class LocalShellService {
     final arg0 = _dartToCString('/bin/sh', malloc);
     final arg1 = _dartToCString('-c', malloc);
     final arg2 = _dartToCString(
-      'cd "\$HOME" 2>/dev/null; exec <"\$0" >"\$0" 2>&1; exec "\$1" -l',
+      'cd "\$HOME" 2>/dev/null; exec <"\$0" >"\$0" 2>&1; stty opost onlcr 2>/dev/null; exec "\$1" -l',
       malloc,
     );
     final arg3 = _dartToCString(slavePath, malloc);
