@@ -907,7 +907,7 @@ class _TerminalTabWidgetState extends State<TerminalTabWidget>
   String? _detectUrlAt(Offset globalPos) {
     if (_terminalController.selection != null) {
       final selectedText = _extractSelectedText(_terminalController.selection!).trim();
-      final urlMatch = RegExp(r'''^https?://[^\s<>"'\]\[\(\)]+''').firstMatch(selectedText);
+      final urlMatch = RegExp(r'''https?://[^\s<>"'\]\[\(\)]+''').firstMatch(selectedText);
       if (urlMatch != null) {
         return _cleanUrl(urlMatch.group(0)!);
       }
@@ -924,11 +924,11 @@ class _TerminalTabWidgetState extends State<TerminalTabWidget>
       if (cell.y < 0 || cell.y >= terminal.buffer.lines.length) return null;
 
       var startLineIdx = cell.y;
-      while (startLineIdx > 0 && terminal.buffer.lines[startLineIdx - 1].isWrapped) {
+      while (startLineIdx > 0 && terminal.buffer.lines[startLineIdx].isWrapped) {
         startLineIdx--;
       }
       var endLineIdx = cell.y;
-      while (endLineIdx < terminal.buffer.lines.length - 1 && terminal.buffer.lines[endLineIdx].isWrapped) {
+      while (endLineIdx < terminal.buffer.lines.length - 1 && terminal.buffer.lines[endLineIdx + 1].isWrapped) {
         endLineIdx++;
       }
 
@@ -952,6 +952,11 @@ class _TerminalTabWidgetState extends State<TerminalTabWidget>
         if (clickedCharIndex >= match.start && clickedCharIndex <= match.end) {
           return _cleanUrl(match.group(0)!);
         }
+      }
+
+      final matches = urlRegex.allMatches(fullText).toList();
+      if (matches.length == 1) {
+        return _cleanUrl(matches.first.group(0)!);
       }
 
       final boundary = terminal.buffer.getWordBoundary(cell);

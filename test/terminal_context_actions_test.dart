@@ -77,6 +77,53 @@ void main() {
       expect(match!.group(0), 'https://flutter.dev/get-started');
     });
 
+    test('URL regex parses OAuth authentication URL containing nested URLs as parameters', () {
+      final oauthUrl =
+          'https://accounts.google.com/o/oauth2/auth?client_id=123.apps.googleusercontent.com&redirect_uri=http://localhost:8085/oauth2callback&response_type=code&scope=https://www.googleapis.com/auth/userinfo.email';
+      final text = 'Please visit this URL to authorize Antigravity: $oauthUrl and continue.';
+      final regex = RegExp(r'''https?://[^\s<>"'\]\[\(\)]+''');
+      final matches = regex.allMatches(text).toList();
+      expect(matches.length, 1);
+      expect(matches.first.group(0), oauthUrl);
+    });
+
+    test('Reconstructs wrapped terminal lines correctly across multiple rows', () {
+      // Simulate lines in terminal buffer where continuation rows have isWrapped = true
+      final rows = [
+        (text: 'https://accounts.google.com/o/oauth2/auth?response_type=code&client_id=123456789', isWrapped: false),
+        (text: '012.apps.googleusercontent.com&redirect_uri=http://localhost:8085/oauth2callback', isWrapped: true),
+        (text: '&scope=https://www.googleapis.com/auth/cloud-platform', isWrapped: true),
+        (text: 'Next non-wrapped line', isWrapped: false),
+      ];
+
+      for (var clickedY = 0; clickedY <= 2; clickedY++) {
+        var startLineIdx = clickedY;
+        while (startLineIdx > 0 && rows[startLineIdx].isWrapped) {
+          startLineIdx--;
+        }
+        var endLineIdx = clickedY;
+        while (endLineIdx < rows.length - 1 && rows[endLineIdx + 1].isWrapped) {
+          endLineIdx++;
+        }
+
+        expect(startLineIdx, 0, reason: 'Failed start line for click on row $clickedY');
+        expect(endLineIdx, 2, reason: 'Failed end line for click on row $clickedY');
+
+        final buffer = StringBuffer();
+        for (var lIdx = startLineIdx; lIdx <= endLineIdx; lIdx++) {
+          buffer.write(rows[lIdx].text);
+        }
+        final fullText = buffer.toString();
+        final regex = RegExp(r'''https?://[^\s<>"'\]\[\(\)]+''');
+        final matches = regex.allMatches(fullText).toList();
+        expect(matches.length, 1);
+        expect(
+          matches.first.group(0),
+          'https://accounts.google.com/o/oauth2/auth?response_type=code&client_id=123456789012.apps.googleusercontent.com&redirect_uri=http://localhost:8085/oauth2callback&scope=https://www.googleapis.com/auth/cloud-platform',
+        );
+      }
+    });
+
     test('cleanFilePath removes quotes, surrounding brackets, and trailing colons', () {
       expect(cleanFilePath('"server.log"'), 'server.log');
       expect(cleanFilePath("'config.yaml'"), 'config.yaml');
